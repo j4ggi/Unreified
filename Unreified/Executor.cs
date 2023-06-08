@@ -119,7 +119,7 @@ public class Executor
             else
             {
                 throw new Exception("Missing dependency for method "
-                    + GetName(toInvoke.Method, true)
+                    + GetName(toInvoke.Method)
                     + " of type "
                     + toInvoke.Target?.GetType().Name);
             }
@@ -273,30 +273,24 @@ public class Executor
         return true;
     }
 
-    private static string GetName(MethodInfo method, bool ignoreGeneratedName = false)
+    private static string GetName(MethodInfo method)
     {
-        var res = method
+        return method
             .GetCustomAttributes(true)
             .OfType<DescriptionAttribute>()
             .FirstOrDefault()
             ?.Description
             ?? method.Name;
-
-        Debug.Assert(ignoreGeneratedName || method.Name != res || !res.Contains('<'), "Please use Description attribute or method with actual name");
-        return res;
     }
 
     private static string GetName(Type type)
     {
-        var res = type
+        return type
             .GetCustomAttributes(true)
             .OfType<DescriptionAttribute>()
             .FirstOrDefault()
             ?.Description
             ?? type.Name;
-
-        Debug.Assert(type.Name != res || !res.Contains('<'), "Please use Description attribute or method with actual name");
-        return res;
     }
 
     protected Type ResolveType(Type interfaceType)
