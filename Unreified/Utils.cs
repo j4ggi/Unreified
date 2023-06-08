@@ -31,4 +31,28 @@ internal static class Utils
     {
         return type2.IsAssignableFrom(type1);
     }
+
+    public static async ValueTask<ConditionalLock> WaitIf(this SemaphoreSlim semaphore, bool condition)
+    {
+        if (condition)
+            await semaphore.WaitAsync();
+        return new ConditionalLock(semaphore, condition);
+    }
+
+    public readonly record struct ConditionalLock : IDisposable
+    {
+        private readonly SemaphoreSlim semaphore;
+        private readonly bool doRelease;
+
+        public ConditionalLock(SemaphoreSlim semaphore, bool doRelease)
+        {
+            this.semaphore = semaphore;
+            this.doRelease = doRelease;
+        }
+        public readonly void Dispose()
+        {
+            if (doRelease)
+                semaphore.Release();
+        }
+    }
 }

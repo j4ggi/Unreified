@@ -1,6 +1,5 @@
 ﻿using System.ComponentModel;
 using System.Diagnostics;
-using System.Linq.Expressions;
 
 using static Unreified.Step;
 
@@ -29,7 +28,7 @@ public class Executor
                 if (!IsLocked(step))
                 {
                     toRun.Add(step);
-                    executing.Add((step, RunStep(step, token)));
+                    executing.Add((step, Execute(step, token)));
                 }
             }
 
@@ -50,7 +49,7 @@ public class Executor
 
             foreach (var res in completed.SelectMany(step => step.Step.Outputs))
             {
-                results.Add(res);
+                stepResults.Add(res);
             }
         }
 
@@ -63,7 +62,10 @@ public class Executor
         var parms = await ResolveConstructorParameters(type, stack);
         var res = Activator.CreateInstance(ResolveType(type), parms.ToArray()) as IExecutable;
         var result = await res!.Execute(token);
-        await RegisterStepOutput(type, res, false);
+
+        using (await containerLock.WaitIf(true))
+            IoCContainer.TryAdd(type, res);
+
         await AddObjectsToContainer(result, false);
     }
 
@@ -95,13 +97,52 @@ public class Executor
         }
     }
 
+    public async Task<Step> Execute(Step step, CancellationToken token)
+    {
+        if (step.Self.IsType)
+            await Execute(step.Self.Type!, token);
+        else
+            await Execute(token, step.Self.Method!);
+        return step;
+    }
+
+    private async Task<object?> Invoke(Delegate toInvoke, Scope toDispose)
+    {
+        var parms = new List<object>();
+        foreach (var paramType in toInvoke.Method.GetParameters().Select(p => p.ParameterType))
+        {
+            var value = await ResolveObject(paramType, toDispose);
+            if (value is not null)
+            {
+                parms.Add(value);
+            }
+            else
+            {
+                throw new Exception("Missing dependency for method "
+                    + GetName(toInvoke.Method, true)
+                    + " of type "
+                    + toInvoke.Target?.GetType().Name);
+            }
+        }
+        var res = toInvoke.DynamicInvoke(parms.ToArray());
+        if (res is Task task)
+        {
+            await task;
+            return toInvoke.Method.ReturnType.IsGenericType
+                && task.GetType().GetProperty(nameof(Task<int>.Result)) is { } ResultProp
+                    ? ResultProp.GetValue(task)
+                    : null;
+        }
+        return res;
+    }
+
     public void RegisterSingleton<TDep>(TDep dependency) where TDep : notnull
     {
         if (!IoCContainer.TryAdd(typeof(TDep), dependency))
         {
             throw new Exception($"Duplicate dependency of type {typeof(TDep).FullName}");
         }
-        SingletonTypeMap.Add(typeof(TDep), typeof(TDep));
+        TypeMap.Add(typeof(TDep), typeof(TDep));
     }
 
     public void RegisterSingletonFactory<TType>(Delegate factory)
@@ -137,14 +178,33 @@ public class Executor
         TransientFactories.Add(typeof(TType), factory);
     }
 
-    public void RegisterType<TInterface, TImplementation>() where TImplementation : TInterface
+    public void RegisterSingletonType<TInterface, TImplementation>() where TImplementation : TInterface
     {
-        SingletonTypeMap.Add(typeof(TInterface), typeof(TImplementation));
+        MapType<TInterface, TImplementation>();
+        SingletonTypes.Add(typeof(TImplementation));
     }
 
-    public void RegisterType<TService>()
+    public void RegisterScopedType<TInterface, TImplementation>() where TImplementation : TInterface
     {
-        SingletonTypeMap.Add(typeof(TService), typeof(TService));
+        MapType<TInterface, TImplementation>();
+        ScopedTypes.Add(typeof(TImplementation));
+    }
+
+    public void RegisterTransientType<TInterface, TImplementation>() where TImplementation : TInterface
+    {
+        MapType<TInterface, TImplementation>();
+        TransientTypes.Add(typeof(TImplementation));
+    }
+
+    public void MapType<TInterface, TImplementation>()
+    {
+        if (TypeMap.ContainsKey(typeof(TInterface)))
+            throw new InvalidOperationException("This type is already mapped");
+
+        if (TypeMap.TryGetValue(typeof(TImplementation), out var found) && found != typeof(TImplementation))
+            throw new NotSupportedException("Recursive type resolution is not supported");
+
+        TypeMap.Add(typeof(TInterface), typeof(TImplementation));
     }
 
     private bool IsLocked(Step step)
@@ -154,38 +214,25 @@ public class Executor
 
     private async Task AddObjectsToContainer(object result, bool isLocked)
     {
-        try
-        {
-            if (!isLocked)
-            {
-                await containerLock.WaitAsync();
-            }
+        using var @lock = await containerLock.WaitIf(!isLocked);
 
-            if (result is IEnumerable<Delegate> delegates)
+        if (result is IEnumerable<Delegate> delegates)
+        {
+            foreach (var del in delegates)
             {
-                foreach (var del in delegates)
-                {
-                    if (!IoCContainer.TryAdd(del.GetType(), del))
-                    {
-                        throw new DuplicateResultException(
-                            "Delegate of this type is already registered");
-                    }
-                }
-            }
-            else
-            {
-                if (!IoCContainer.TryAdd(result.GetType(), result))
+                if (!IoCContainer.TryAdd(del.GetType(), del))
                 {
                     throw new DuplicateResultException(
-                        "Object of this type is already registered");
+                        "Delegate of this type is already registered");
                 }
             }
         }
-        finally
+        else
         {
-            if (!isLocked)
+            if (!IoCContainer.TryAdd(result.GetType(), result))
             {
-                _ = containerLock.Release();
+                throw new DuplicateResultException(
+                    "Object of this type is already registered");
             }
         }
     }
@@ -199,7 +246,7 @@ public class Executor
         {
             if (input.NamedDependency is not null)
             {
-                if (!results.Contains(input))
+                if (!stepResults.Contains(input))
                     return false;
             }
             else if (input.TypedDependency is { } type)
@@ -207,8 +254,8 @@ public class Executor
                 if (!IoCContainer.ContainsKey(type)
                     && !SingletonFactories.ContainsKey(type)
                     && !TransientFactories.ContainsKey(type)
-                    && !SingletonTypeMap.ContainsKey(type)
-                    && !results.Contains(input))
+                    && !TypeMap.ContainsKey(type)
+                    && !stepResults.Contains(input))
                 {
                     return false;
                 }
@@ -216,7 +263,7 @@ public class Executor
             else if (input.ExactValueDependency is { } obj)
             {
                 if (!IoCContainer.ContainsKey(obj.GetType())
-                    && !results.Contains(input))
+                    && !stepResults.Contains(input))
                 {
                     return false;
                 }
@@ -224,62 +271,6 @@ public class Executor
         }
 
         return true;
-    }
-
-    private async Task<Step> RunStep(Step step, CancellationToken token)
-    {
-        if (step.Self.IsType)
-            await Execute(step.Self.Type!, token);
-        else
-            await Execute(token, step.Self.Method!);
-        return step;
-    }
-
-    //private bool CanOverwrite(Step step, object result)
-    //{
-    //    if (step.Inputs)
-    //}
-
-    private async Task<object?> Invoke(Delegate toInvoke, Scope toDispose, bool addToContainer = true, bool wasLocked = false)
-    {
-        var parms = new List<object>();
-        foreach (var paramType in toInvoke.Method.GetParameters().Select(p => p.ParameterType))
-        {
-            var value = await ResolveObject(paramType, toDispose, wasLocked);
-            if (value is not null)
-            {
-                parms.Add(value);
-            }
-            else
-            {
-                throw new Exception("Missing dependency for method "
-                    + GetName(toInvoke.Method, true)
-                    + " of type "
-                    + toInvoke.Target?.GetType().Name);
-            }
-        }
-        var res = toInvoke.DynamicInvoke(parms.ToArray());
-        if (res is Task task)
-        {
-            await task;
-            if (toInvoke.Method.ReturnType.IsGenericType && task.GetType().GetProperty(nameof(Task<int>.Result)) is { } ResultProp)
-            {
-                var result = ResultProp.GetValue(task);
-                if (result is not null && addToContainer)
-                    await AddObjectsToContainer(result, wasLocked);
-
-                return result;
-            }
-            return null;
-        }
-        else if (res is not null)
-        {
-            if (addToContainer)
-                await AddObjectsToContainer(res, wasLocked);
-
-            return res;
-        }
-        return null;
     }
 
     private static string GetName(MethodInfo method, bool ignoreGeneratedName = false)
@@ -309,15 +300,15 @@ public class Executor
     }
 
     protected Type ResolveType(Type interfaceType)
-        => SingletonTypeMap.GetValueOrDefault(interfaceType) ?? interfaceType;
+        => TypeMap.GetValueOrDefault(interfaceType) ?? interfaceType;
 
-    private async Task<List<object>> ResolveConstructorParameters(Type type, Scope scope, bool isLocked = false)
+    private async Task<List<object>> ResolveConstructorParameters(Type type, Scope scope)
     {
         var parms = new List<object>();
         var ctor = ResolveType(type).GetConstructors().Single();
         foreach (var paramType in ctor.GetParameters().Select(p => p.ParameterType))
         {
-            var value = await ResolveObject(paramType, scope, isLocked);
+            var value = await ResolveObject(paramType, scope);
             if (value is not null)
             {
                 parms.Add(value);
@@ -325,7 +316,7 @@ public class Executor
             else
             {
                 throw new Exception("Missing dependency of type " + paramType.Name + " for Step "
-                    + type.Name
+                    + GetName(type)
                     + ". Make sure you execute everything in proper order");
             }
         }
@@ -333,130 +324,116 @@ public class Executor
         return parms;
     }
 
-    protected virtual async Task<object?> ResolveObject(Type paramType, Scope scope, bool wasLocked)
+    private TValue? FindValue<TValue>(IDictionary<Type, TValue> dict, Type key) where TValue : class
     {
-        try
-        {
-            if (!wasLocked)
-            {
-                await containerLock.WaitAsync();
-            }
-
-            if (IoCContainer.TryGetValue(paramType, out var value)
-                || IoCContainer.TryGetValue(ResolveType(paramType), out value))
-            {
-                return value;
-            }
-
-            if (scope.Scoped.TryGetValue(paramType, out value)
-                || scope.Scoped.TryGetValue(ResolveType(paramType), out value))
-            {
-                return value;
-            }
-
-            if (SingletonFactories.TryGetValue(paramType, out var fact)
-                || SingletonFactories.TryGetValue(ResolveType(paramType), out fact))
-            {
-                var obj = await Invoke(fact, scope, true, true);
-                if (obj is not null && obj.GetType() != paramType)
-                {
-                    lock (SingletonTypeMap)
-                        SingletonTypeMap.Add(paramType, obj.GetType());
-                }
-
-                return obj;
-            }
-
-            if (ScopedFactories.TryGetValue(paramType, out fact)
-                || ScopedFactories.TryGetValue(ResolveType(paramType), out fact))
-            {
-                var obj = await Invoke(fact, scope, true, true);
-                if (obj is not null && obj.GetType() != paramType)
-                {
-                    lock (ScopedTypeMap)
-                        ScopedTypeMap.Add(paramType, obj.GetType());
-                    scope.Register(obj);
-                }
-
-                return obj;
-            }
-
-            if (TransientFactories.TryGetValue(paramType, out fact)
-                || TransientFactories.TryGetValue(ResolveType(paramType), out fact))
-            {
-                var result = await Invoke(fact, scope, false, true);
-                if (result is not null)
-                    scope.Register(result);
-                return result;
-            }
-
-            if (SingletonTypeMap.TryGetValue(paramType, out var toCreate))
-            {
-                var parms = await ResolveConstructorParameters(toCreate, scope, true);
-                return await CreateAndRegisterInstance(toCreate, parms, true);
-            }
-
-            return null;
-        }
-        finally
-        {
-            if (!wasLocked)
-                containerLock.Release();
-        }
+        return dict.TryGetValue(key, out var value) || dict.TryGetValue(ResolveType(key), out value)
+            ? value
+            : null;
     }
 
-    private async Task<object> CreateAndRegisterInstance(Type type, List<object> parms, bool ignoreLock)
+    protected virtual async Task<object?> ResolveObject(Type paramType, Scope scope)
     {
-        type = ResolveType(type);
-        var res = Activator.CreateInstance(type, parms.ToArray())!;
-        await RegisterStepOutput(type, res, ignoreLock);
-        return res;
-    }
+        var value = FindValue(IoCContainer, paramType) ?? FindValue(scope.Scoped, paramType);
+        if (value is not null)
+            return value;
 
-    private async Task RegisterStepOutput(Type type, object res, bool ignoreLock)
-    {
-        try
+        if (FindValue(SingletonFactories, paramType) is { } factory)
         {
-            if (!ignoreLock)
+            var obj = await Invoke(factory, scope);
+            if (obj is not null)
             {
-                await containerLock.WaitAsync();
+                lock (IoCContainer)
+                    IoCContainer.TryAdd(paramType, obj);
+                if (obj.GetType() != paramType)
+                {
+                    lock (TypeMap)
+                        TypeMap.TryAdd(paramType, obj.GetType());
+                }
             }
 
-            if (!IoCContainer.ContainsKey(type))
-            {
-                IoCContainer.Add(type, res);
-            }
+            return obj;
         }
-        finally
+        if (SingletonTypes.Contains(paramType) || SingletonTypes.Contains(ResolveType(paramType)))
         {
-            if (!ignoreLock)
-            {
-                _ = containerLock.Release();
-            }
+            var parms = await ResolveConstructorParameters(paramType, scope);
+
+            var newType = ResolveType(paramType);
+            var res = Activator.CreateInstance(newType, parms.ToArray())!;
+
+            lock (IoCContainer)
+                IoCContainer.TryAdd(newType, res);
+
+            return res;
         }
+
+        if (FindValue(ScopedFactories, paramType) is { } scopedFactory)
+        {
+            var obj = await Invoke(scopedFactory, scope);
+            scope.Register(obj);
+            return obj;
+        }
+        if (ScopedTypes.Contains(paramType) || ScopedTypes.Contains(ResolveType(paramType)))
+        {
+            var parms = await ResolveConstructorParameters(paramType, scope);
+
+            var newType = ResolveType(paramType);
+            var res = Activator.CreateInstance(newType, parms.ToArray())!;
+
+            scope.Register(res);
+
+            return res;
+        }
+
+        if (FindValue(TransientFactories, paramType) is { } transientFactory)
+        {
+            var result = await Invoke(transientFactory, scope);
+            scope.AddDisposable(result);
+            return result;
+        }
+        if (TransientTypes.Contains(paramType) || TransientTypes.Contains(ResolveType(paramType)))
+        {
+            var parms = await ResolveConstructorParameters(paramType, scope);
+
+            var newType = ResolveType(paramType);
+            var res = Activator.CreateInstance(newType, parms.ToArray())!;
+
+            scope.AddDisposable(res);
+
+            return res;
+        }
+
+        return null;
     }
 
     protected readonly Dictionary<Type, object> IoCContainer = new();
-    protected readonly Dictionary<Type, Type> SingletonTypeMap = new();
-    protected readonly Dictionary<Type, Type> ScopedTypeMap = new();
-    protected readonly Dictionary<Type, Type> TransientTypeMap = new();
+    protected readonly Dictionary<Type, Type> TypeMap = new();
+    protected readonly HashSet<Type> TransientTypes = new();
+    protected readonly HashSet<Type> ScopedTypes = new();
+    protected readonly HashSet<Type> SingletonTypes = new();
     protected readonly Dictionary<Type, Delegate> SingletonFactories = new();
     protected readonly Dictionary<Type, Delegate> ScopedFactories = new();
     protected readonly Dictionary<Type, Delegate> TransientFactories = new();
 
     private readonly List<Step> steps = new();
-    private readonly HashSet<StepIO> results = new(EqualityComparer<StepIO>.Default);
+    private readonly HashSet<StepIO> stepResults = new(EqualityComparer<StepIO>.Default);
     private readonly HashSet<StepIO> mutexes = new();
     private readonly HashSet<(Step Step, Task Task)> executing = new();
     private readonly SemaphoreSlim containerLock = new(1, 1);
 
     protected class Scope
     {
-        public void Register(object possibleDisposable)
+        public void Register(object? possibleDisposable)
         {
             if (possibleDisposable == null)
                 return;
             Scoped[possibleDisposable.GetType()] = possibleDisposable;
+            AddDisposable(possibleDisposable);
+        }
+
+        public void AddDisposable(object? possibleDisposable)
+        {
+            if (possibleDisposable == null)
+                return;
             if (possibleDisposable is IDisposable disp)
                 Disposables.Push(disp);
             else if (possibleDisposable is IAsyncDisposable asyncDisp)
