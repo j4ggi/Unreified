@@ -72,7 +72,7 @@ public class Executor
         foreach (var step in steps)
         {
             await using var stack = new Scope();
-            await Invoke(step, stack);
+            await AddObjectsToContainer(await Invoke(step, stack), false);
 
             token.ThrowIfCancellationRequested();
         }
@@ -209,8 +209,11 @@ public class Executor
         return step.Mutexes.Any(mutexes.Contains);
     }
 
-    private async Task AddObjectsToContainer(object result, bool isLocked)
+    private async Task AddObjectsToContainer(object? result, bool isLocked)
     {
+        if (result is null)
+            return;
+
         using var @lock = await containerLock.WaitIf(!isLocked);
 
         if (result is IEnumerable<Delegate> delegates)
@@ -224,13 +227,10 @@ public class Executor
                 }
             }
         }
-        else
+        else if (!IoCContainer.TryAdd(result.GetType(), result))
         {
-            if (!IoCContainer.TryAdd(result.GetType(), result))
-            {
-                throw new DuplicateResultException(
-                    "Object of this type is already registered");
-            }
+            throw new DuplicateResultException(
+                "Object of this type is already registered");
         }
     }
 
