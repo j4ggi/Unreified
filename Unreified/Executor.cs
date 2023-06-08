@@ -1,7 +1,4 @@
-﻿using System.ComponentModel;
-using System.Diagnostics;
-
-using static Unreified.Step;
+﻿using static Unreified.Step;
 
 namespace Unreified;
 public class Executor
@@ -33,7 +30,7 @@ public class Executor
             }
 
             if (executing.Count == 0)
-                throw new LeftOverStepException("Could not execute all steps");
+                throw new LeftOverStepException("Could not execute all steps. Make sure all dependencies can be resolved");
 
             foreach (var step in toRun)
                 _ = steps.Remove(step);
@@ -56,11 +53,11 @@ public class Executor
         await Task.WhenAll(executing.Select(x => x.Task));
     }
 
-    public virtual async Task Execute(Type type, CancellationToken token)
+    protected virtual async Task Execute(Type type, CancellationToken token)
     {
         await using var stack = new Scope();
         var parms = await ResolveConstructorParameters(type, stack);
-        var res = Activator.CreateInstance(ResolveType(type), parms.ToArray()) as IExecutable;
+        var res = Activator.CreateInstance(MapType(type), parms.ToArray()) as IExecutable;
         var result = await res!.Execute(token);
 
         using (await containerLock.WaitIf(true))
@@ -69,7 +66,7 @@ public class Executor
         await AddObjectsToContainer(result, false);
     }
 
-    public virtual async Task Execute(CancellationToken token, params Delegate[] steps)
+    protected virtual async Task Execute(CancellationToken token, params Delegate[] steps)
     {
         token.ThrowIfCancellationRequested();
         foreach (var step in steps)
@@ -87,7 +84,7 @@ public class Executor
         {
             if (step.Self.IsType)
             {
-                var type = ResolveType(step.Self.Type!);
+                var type = MapType(step.Self.Type!);
                 this.steps.Add(FromType(type));
             }
             else
@@ -118,7 +115,7 @@ public class Executor
             }
             else
             {
-                throw new Exception("Missing dependency for method "
+                throw new MissingDependencyException("Missing dependency for method "
                     + GetName(toInvoke.Method)
                     + " of type "
                     + toInvoke.Target?.GetType().Name);
@@ -180,23 +177,23 @@ public class Executor
 
     public void RegisterSingletonType<TInterface, TImplementation>() where TImplementation : TInterface
     {
-        MapType<TInterface, TImplementation>();
+        RegisterTypeMapping<TInterface, TImplementation>();
         SingletonTypes.Add(typeof(TImplementation));
     }
 
     public void RegisterScopedType<TInterface, TImplementation>() where TImplementation : TInterface
     {
-        MapType<TInterface, TImplementation>();
+        RegisterTypeMapping<TInterface, TImplementation>();
         ScopedTypes.Add(typeof(TImplementation));
     }
 
     public void RegisterTransientType<TInterface, TImplementation>() where TImplementation : TInterface
     {
-        MapType<TInterface, TImplementation>();
+        RegisterTypeMapping<TInterface, TImplementation>();
         TransientTypes.Add(typeof(TImplementation));
     }
 
-    public void MapType<TInterface, TImplementation>()
+    public void RegisterTypeMapping<TInterface, TImplementation>()
     {
         if (TypeMap.ContainsKey(typeof(TInterface)))
             throw new InvalidOperationException("This type is already mapped");
@@ -237,6 +234,61 @@ public class Executor
         }
     }
 
+    private bool CanResolveObject(Type type)
+    {
+        var mappedType = MapType(type);
+        if (ResolvableTypes.Contains(type) || ResolvableTypes.Contains(mappedType))
+        {
+            return true;
+        }
+
+        if (IoCContainer.ContainsKey(type)
+            || SingletonFactories.ContainsKey(type)
+            || ScopedFactories.ContainsKey(type)
+            || TransientFactories.ContainsKey(type)
+            || SingletonTypes.Contains(type)
+            || ScopedTypes.Contains(type)
+            || TransientTypes.Contains(type))
+        {
+            var res = type.GetConstructors()
+                .Single(x => !x.IsStatic)
+                .GetParameters()
+                .Select(x => x.ParameterType)
+                .All(CanResolveObject);
+            if (res)
+            {
+                lock (ResolvableTypes)
+                    ResolvableTypes.Add(type);
+            }
+
+            return res;
+        }
+
+        if (IoCContainer.ContainsKey(mappedType)
+            || SingletonFactories.ContainsKey(mappedType)
+            || ScopedFactories.ContainsKey(mappedType)
+            || TransientFactories.ContainsKey(mappedType)
+            || SingletonTypes.Contains(mappedType)
+            || ScopedTypes.Contains(mappedType)
+            || TransientTypes.Contains(mappedType))
+        {
+            var res = mappedType.GetConstructors()
+                .Single(x => !x.IsStatic)
+                .GetParameters()
+                .Select(x => x.ParameterType)
+                .All(CanResolveObject);
+            if (res)
+            {
+                lock (ResolvableTypes)
+                    ResolvableTypes.Add(mappedType);
+            }
+
+            return res;
+        }
+
+        return false;
+    }
+
     private bool CanRunStep(Step step)
     {
         if (IsLocked(step))
@@ -251,11 +303,7 @@ public class Executor
             }
             else if (input.TypedDependency is { } type)
             {
-                if (!IoCContainer.ContainsKey(type)
-                    && !SingletonFactories.ContainsKey(type)
-                    && !TransientFactories.ContainsKey(type)
-                    && !TypeMap.ContainsKey(type)
-                    && !stepResults.Contains(input))
+                if (!CanResolveObject(type) && !stepResults.Contains(input))
                 {
                     return false;
                 }
@@ -293,13 +341,13 @@ public class Executor
             ?? type.Name;
     }
 
-    protected Type ResolveType(Type interfaceType)
+    protected Type MapType(Type interfaceType)
         => TypeMap.GetValueOrDefault(interfaceType) ?? interfaceType;
 
     private async Task<List<object>> ResolveConstructorParameters(Type type, Scope scope)
     {
         var parms = new List<object>();
-        var ctor = ResolveType(type).GetConstructors().Single();
+        var ctor = MapType(type).GetConstructors().Single();
         foreach (var paramType in ctor.GetParameters().Select(p => p.ParameterType))
         {
             var value = await ResolveObject(paramType, scope);
@@ -320,7 +368,7 @@ public class Executor
 
     private TValue? FindValue<TValue>(IDictionary<Type, TValue> dict, Type key) where TValue : class
     {
-        return dict.TryGetValue(key, out var value) || dict.TryGetValue(ResolveType(key), out value)
+        return dict.TryGetValue(key, out var value) || dict.TryGetValue(MapType(key), out value)
             ? value
             : null;
     }
@@ -347,11 +395,11 @@ public class Executor
 
             return obj;
         }
-        if (SingletonTypes.Contains(paramType) || SingletonTypes.Contains(ResolveType(paramType)))
+        if (SingletonTypes.Contains(paramType) || SingletonTypes.Contains(MapType(paramType)))
         {
             var parms = await ResolveConstructorParameters(paramType, scope);
 
-            var newType = ResolveType(paramType);
+            var newType = MapType(paramType);
             var res = Activator.CreateInstance(newType, parms.ToArray())!;
 
             lock (IoCContainer)
@@ -366,11 +414,11 @@ public class Executor
             scope.Register(obj);
             return obj;
         }
-        if (ScopedTypes.Contains(paramType) || ScopedTypes.Contains(ResolveType(paramType)))
+        if (ScopedTypes.Contains(paramType) || ScopedTypes.Contains(MapType(paramType)))
         {
             var parms = await ResolveConstructorParameters(paramType, scope);
 
-            var newType = ResolveType(paramType);
+            var newType = MapType(paramType);
             var res = Activator.CreateInstance(newType, parms.ToArray())!;
 
             scope.Register(res);
@@ -384,11 +432,11 @@ public class Executor
             scope.AddDisposable(result);
             return result;
         }
-        if (TransientTypes.Contains(paramType) || TransientTypes.Contains(ResolveType(paramType)))
+        if (TransientTypes.Contains(paramType) || TransientTypes.Contains(MapType(paramType)))
         {
             var parms = await ResolveConstructorParameters(paramType, scope);
 
-            var newType = ResolveType(paramType);
+            var newType = MapType(paramType);
             var res = Activator.CreateInstance(newType, parms.ToArray())!;
 
             scope.AddDisposable(res);
@@ -401,6 +449,7 @@ public class Executor
 
     protected readonly Dictionary<Type, object> IoCContainer = new();
     protected readonly Dictionary<Type, Type> TypeMap = new();
+    protected readonly HashSet<Type> ResolvableTypes = new();
     protected readonly HashSet<Type> TransientTypes = new();
     protected readonly HashSet<Type> ScopedTypes = new();
     protected readonly HashSet<Type> SingletonTypes = new();

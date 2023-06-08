@@ -1,7 +1,4 @@
-﻿using System.ComponentModel;
-using System.Linq;
-
-namespace Unreified;
+﻿namespace Unreified;
 public record class Step
 {
     public Step(
