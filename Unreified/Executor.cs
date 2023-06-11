@@ -348,8 +348,9 @@ public class Executor
             }
             else if (input.ExactValueDependency is { } obj)
             {
-                if (!IoCContainer.ContainsKey(obj.GetType())
-                    && !stepResults.Contains(input))
+                var hasResult = stepResults.Contains(input);
+                var hasSingleton = IoCContainer.TryGetValue(obj.GetType(), out var found) && found.Equals(obj);
+                if (!hasResult && !hasSingleton)
                 {
                     result.List.Add(input);
                 }

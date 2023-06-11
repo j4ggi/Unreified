@@ -38,6 +38,33 @@ public class ExecutorTests
     }
 
     [Fact]
+    public async Task Step_with_input_dependecies_throws_MissingDependencyException_if_registered_singleton_is_not_the_same()
+    {
+        var res = false;
+        var executor = new Executor();
+        executor.RegisterSingleton(43);
+        var toExecute = Step.FromMethod([Input(42)]() => res = true);
+
+        await Assert.ThrowsAnyAsync<MissingDependencyException>(
+            async () => await executor.Execute(toExecute, default));
+
+        Assert.False(res);
+    }
+
+    [Fact]
+    public async Task Step_with_input_dependecies_accepts_registered_singleton()
+    {
+        var res = false;
+        var executor = new Executor();
+        executor.RegisterSingleton(42);
+        var toExecute = Step.FromMethod([Input(42)]() => res = true);
+
+        await executor.Execute(toExecute, default);
+
+        Assert.True(res);
+    }
+
+    [Fact]
     public async Task Step_with_dependecies_triggers_factory()
     {
         var res = false;
