@@ -1,7 +1,7 @@
 ﻿namespace Unreified;
 public record class Step
 {
-    public Step(
+    protected Step(
         StepSignature self,
         IList<StepIO>? outputs,
         IList<StepIO>? inputs,

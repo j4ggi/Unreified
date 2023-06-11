@@ -375,6 +375,8 @@ public class Executor
 
     protected virtual async Task<object?> ResolveObject(Type paramType, Scope scope)
     {
+        using var dependencyLoopDetector = scope.CheckDependencyLoop(paramType);
+
         var value = FindValue(IoCContainer, paramType) ?? FindValue(scope.Scoped, paramType);
         if (value is not null)
             return value;
@@ -486,6 +488,7 @@ public class Executor
         public async Task DisposeAsync()
         {
             Scoped.Clear();
+            ParameterTypesPreviouslyAttemptedToCreate.Clear();
             while (Disposables.TryPop(out var popped))
             {
                 if (popped is IAsyncDisposable aDisp)
@@ -494,8 +497,29 @@ public class Executor
                     disp.Dispose();
             }
         }
-
         public Stack<object> Disposables { get; } = new();
         public Dictionary<Type, object> Scoped { get; } = new();
+
+        protected internal DependencyLoopDetector CheckDependencyLoop(Type parameterType)
+        {
+            return new DependencyLoopDetector(this, parameterType);
+        }
+
+        private HashSet<Type> ParameterTypesPreviouslyAttemptedToCreate { get; } = new();
+
+        protected internal readonly struct DependencyLoopDetector : IDisposable
+        {
+            private readonly Scope scope;
+            private readonly Type type;
+
+            public DependencyLoopDetector(Scope scope, Type type)
+            {
+                this.scope = scope;
+                this.type = type;
+                if (!scope.ParameterTypesPreviouslyAttemptedToCreate.Add(type))
+                    throw new DependencyLoopException($"Found dependency loop while trying to resolve object of type {type.Name}");
+            }
+            public void Dispose() => scope.ParameterTypesPreviouslyAttemptedToCreate.Remove(type);
+        }
     }
 }

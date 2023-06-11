@@ -25,6 +25,7 @@ public class StepIOTests
         Assert.Equal(new Step.StepIO(typeof(int)), new Step.StepIO(typeof(int)));
     }
 
+#nullable disable
     [Fact]
     public void Throws_on_null_typed_dependency()
     {
@@ -42,4 +43,5 @@ public class StepIOTests
     {
         Assert.ThrowsAny<ArgumentNullException>(() => new Step.StepIO(null as object));
     }
+#nullable restore
 }
