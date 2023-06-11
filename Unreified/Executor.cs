@@ -14,37 +14,38 @@ public class Executor
     {
         while (steps.Count > 0)
         {
-            var available = steps.Where(CanRunStep).ToList();
-
-            var toRun = new List<Step>();
-            foreach (var step in available)
+            using (var available = await GetAvailableSteps(steps))
+            using (var toRun = PooledList<Step>.Get())
             {
-                if (executing.Count == maxDegreeOfParallelism)
-                    break;
-
-                if (!IsLocked(step))
+                foreach (var step in available.List)
                 {
-                    toRun.Add(step);
-                    executing.Add((step, Execute(step, token)));
+                    if (executing.Count == maxDegreeOfParallelism)
+                        break;
+
+                    if (!IsLocked(step))
+                    {
+                        toRun.List.Add(step);
+                        executing.Add((step, Execute(step, false, token)));
+                    }
                 }
+
+                if (executing.Count == 0)
+                    throw new LeftOverStepException("Could not execute all steps. Make sure all dependencies can be resolved");
+
+                foreach (var step in toRun.List)
+                    _ = steps.Remove(step);
             }
 
-            if (executing.Count == 0)
-                throw new LeftOverStepException("Could not execute all steps. Make sure all dependencies can be resolved");
-
-            foreach (var step in toRun)
-                _ = steps.Remove(step);
-
             _ = await Task.WhenAny(executing.Select(x => x.Task));
-            var completed = executing.Where(x => x.Task.IsCompleted).ToList();
+            using var completed = ToListFromPool(executing.Where(x => x.Task.IsCompleted));
 
-            foreach (var step in completed)
+            foreach (var step in completed.List)
             {
                 _ = executing.Remove(step);
                 await step.Task; // propagate any errors
             }
 
-            foreach (var res in completed.SelectMany(step => step.Step.Outputs))
+            foreach (var res in completed.List.SelectMany(step => step.Step.Outputs))
             {
                 stepResults.Add(res);
             }
@@ -53,12 +54,28 @@ public class Executor
         await Task.WhenAll(executing.Select(x => x.Task));
     }
 
+    protected virtual async ValueTask<PooledList<Step>> GetAvailableSteps(IEnumerable<Step> steps)
+    {
+        var list = PooledList<Step>.Get();
+        foreach (var step in steps)
+        {
+            if (await CanRunStep(step))
+                list.List.Add(step);
+        }
+
+        return list;
+    }
+
     protected virtual async Task Execute(Type type, CancellationToken token)
     {
-        await using var stack = new Scope();
-        var parms = await ResolveConstructorParameters(type, stack);
-        var res = Activator.CreateInstance(MapType(type), parms.ToArray()) as IExecutable;
-        var result = await res!.Execute(token);
+        await using var scope = Pooled<Scope>.Get();
+        IExecutable res;
+        using var parms = await ResolveConstructorParameters(type, scope.Value);
+        {
+            res = Activator.CreateInstance(MapType(type), parms.ToDisposableArray()) as IExecutable
+                ?? throw new InvalidOperationException();
+        }
+        var result = await res.Execute(token);
 
         using (await containerLock.WaitIf(true))
             IoCContainer.TryAdd(type, res);
@@ -71,8 +88,8 @@ public class Executor
         token.ThrowIfCancellationRequested();
         foreach (var step in steps)
         {
-            await using var stack = new Scope();
-            await AddObjectsToContainer(await Invoke(step, stack), false);
+            await using var scope = Pooled<Scope>.Get();
+            await AddObjectsToContainer(await Invoke(step, scope.Value), false);
 
             token.ThrowIfCancellationRequested();
         }
@@ -96,6 +113,21 @@ public class Executor
 
     public async Task<Step> Execute(Step step, CancellationToken token)
     {
+        return await Execute(step, true, token);
+    }
+
+    protected virtual async Task<Step> Execute(Step step, bool validate, CancellationToken token)
+    {
+        if (validate)
+        {
+            await using var scope = Pooled<Scope>.Get();
+            if (GetMissingDependencies(step, scope.Value) is { Length: > 0 } missingDeps)
+            {
+                var deps = String.Join(Environment.NewLine, missingDeps.Select(x => x.Stringify()));
+                var message = $"Missing dependencies:{Environment.NewLine}{deps}";
+                throw new MissingDependencyException(message);
+            }
+        }
         if (step.Self.IsType)
             await Execute(step.Self.Type!, token);
         else
@@ -105,13 +137,13 @@ public class Executor
 
     private async Task<object?> Invoke(Delegate toInvoke, Scope toDispose)
     {
-        var parms = new List<object>();
+        using var parms = PooledList<object>.Get();
         foreach (var paramType in toInvoke.Method.GetParameters().Select(p => p.ParameterType))
         {
             var value = await ResolveObject(paramType, toDispose);
             if (value is not null)
             {
-                parms.Add(value);
+                parms.List.Add(value);
             }
             else
             {
@@ -121,7 +153,7 @@ public class Executor
                     + toInvoke.Target?.GetType().Name);
             }
         }
-        var res = toInvoke.DynamicInvoke(parms.ToArray());
+        var res = toInvoke.DynamicInvoke(parms.ToDisposableArray());
         if (res is Task task)
         {
             await task;
@@ -234,27 +266,33 @@ public class Executor
         }
     }
 
-    private bool CanResolveObject(Type type)
+    private bool CanResolveObject(Type type, Scope scope)
     {
-        var mappedType = MapType(type);
-        if (ResolvableTypes.Contains(type) || ResolvableTypes.Contains(mappedType))
+        using var dependencyLoopDetector = scope.CheckDependencyLoop(type);
+
+        if (ResolvableTypes.Contains(type))
         {
             return true;
         }
 
-        if (IoCContainer.ContainsKey(type)
-            || SingletonFactories.ContainsKey(type)
-            || ScopedFactories.ContainsKey(type)
-            || TransientFactories.ContainsKey(type)
-            || SingletonTypes.Contains(type)
-            || ScopedTypes.Contains(type)
-            || TransientTypes.Contains(type))
+        if (IoCContainer.ContainsKey(type))
         {
-            var res = type.GetConstructors()
-                .Single(x => !x.IsStatic)
-                .GetParameters()
+            lock (ResolvableTypes)
+                ResolvableTypes.Add(type);
+            return true;
+        }
+        if (SingletonFactories.ContainsKey(type)
+            || ScopedFactories.ContainsKey(type)
+            || TransientFactories.ContainsKey(type))
+        {
+            var res =
+                (SingletonFactories.GetValueOrDefault(type)
+                    ?? ScopedFactories.GetValueOrDefault(type)
+                    ?? TransientFactories.GetValueOrDefault(type))
+                .Method.GetParameters()
                 .Select(x => x.ParameterType)
-                .All(CanResolveObject);
+                .All(t => CanResolveObject(t, scope));
+
             if (res)
             {
                 lock (ResolvableTypes)
@@ -264,61 +302,65 @@ public class Executor
             return res;
         }
 
-        if (IoCContainer.ContainsKey(mappedType)
-            || SingletonFactories.ContainsKey(mappedType)
-            || ScopedFactories.ContainsKey(mappedType)
-            || TransientFactories.ContainsKey(mappedType)
-            || SingletonTypes.Contains(mappedType)
-            || ScopedTypes.Contains(mappedType)
-            || TransientTypes.Contains(mappedType))
+        if (SingletonTypes.Contains(type)
+            || ScopedTypes.Contains(type)
+            || TransientTypes.Contains(type))
         {
-            var res = mappedType.GetConstructors()
+            var res = type.GetConstructors()
                 .Single(x => !x.IsStatic)
                 .GetParameters()
                 .Select(x => x.ParameterType)
-                .All(CanResolveObject);
+                .All(t => CanResolveObject(t, scope));
             if (res)
             {
                 lock (ResolvableTypes)
-                    ResolvableTypes.Add(mappedType);
+                    ResolvableTypes.Add(type);
             }
 
             return res;
         }
 
-        return false;
+        var mappedType = MapType(type);
+        return mappedType != type && CanResolveObject(mappedType, scope);
     }
 
-    private bool CanRunStep(Step step)
+    private async ValueTask<bool> CanRunStep(Step step)
     {
         if (IsLocked(step))
             return false;
+
+        await using var scope = Pooled<Scope>.Get();
+        return !GetMissingDependencies(step, scope.Value).Any();
+    }
+
+    private StepIO[] GetMissingDependencies(Step step, Scope scope)
+    {
+        using var result = PooledList<StepIO>.Get();
 
         foreach (var input in step.Inputs)
         {
             if (input.NamedDependency is not null)
             {
                 if (!stepResults.Contains(input))
-                    return false;
+                    result.List.Add(input);
             }
             else if (input.TypedDependency is { } type)
             {
-                if (!CanResolveObject(type) && !stepResults.Contains(input))
-                {
-                    return false;
-                }
+                if (!CanResolveObject(type, scope) && !stepResults.Contains(input))
+                    result.List.Add(input);
             }
             else if (input.ExactValueDependency is { } obj)
             {
                 if (!IoCContainer.ContainsKey(obj.GetType())
                     && !stepResults.Contains(input))
                 {
-                    return false;
+                    result.List.Add(input);
                 }
             }
         }
-
-        return true;
+        return result.List.Count > 0
+            ? result.List.ToArray()
+            : Array.Empty<StepIO>();
     }
 
     private static string GetName(MethodInfo method)
@@ -344,23 +386,31 @@ public class Executor
     protected Type MapType(Type interfaceType)
         => TypeMap.GetValueOrDefault(interfaceType) ?? interfaceType;
 
-    private async Task<List<object>> ResolveConstructorParameters(Type type, Scope scope)
+    private async ValueTask<PooledList<object>> ResolveConstructorParameters(Type type, Scope scope)
     {
-        var parms = new List<object>();
-        var ctor = MapType(type).GetConstructors().Single();
-        foreach (var paramType in ctor.GetParameters().Select(p => p.ParameterType))
+        var parms = PooledList<object>.Get();
+        try
         {
-            var value = await ResolveObject(paramType, scope);
-            if (value is not null)
+            var ctor = MapType(type).GetConstructors().Single();
+            foreach (var paramType in ctor.GetParameters().Select(p => p.ParameterType))
             {
-                parms.Add(value);
+                var value = await ResolveObject(paramType, scope);
+                if (value is not null)
+                {
+                    parms.List.Add(value);
+                }
+                else
+                {
+                    throw new Exception("Missing dependency of type " + paramType.Name + " for Step "
+                        + GetName(type)
+                        + ". Make sure you execute everything in proper order");
+                }
             }
-            else
-            {
-                throw new Exception("Missing dependency of type " + paramType.Name + " for Step "
-                    + GetName(type)
-                    + ". Make sure you execute everything in proper order");
-            }
+        }
+        catch
+        {
+            parms.Dispose();
+            throw;
         }
 
         return parms;
@@ -399,10 +449,10 @@ public class Executor
         }
         if (SingletonTypes.Contains(paramType) || SingletonTypes.Contains(MapType(paramType)))
         {
-            var parms = await ResolveConstructorParameters(paramType, scope);
+            using var parms = await ResolveConstructorParameters(paramType, scope);
 
             var newType = MapType(paramType);
-            var res = Activator.CreateInstance(newType, parms.ToArray())!;
+            var res = Activator.CreateInstance(newType, parms.ToDisposableArray())!;
 
             lock (IoCContainer)
                 IoCContainer.TryAdd(newType, res);
@@ -418,10 +468,10 @@ public class Executor
         }
         if (ScopedTypes.Contains(paramType) || ScopedTypes.Contains(MapType(paramType)))
         {
-            var parms = await ResolveConstructorParameters(paramType, scope);
+            using var parms = await ResolveConstructorParameters(paramType, scope);
 
             var newType = MapType(paramType);
-            var res = Activator.CreateInstance(newType, parms.ToArray())!;
+            var res = Activator.CreateInstance(newType, parms.ToDisposableArray())!;
 
             scope.Register(res);
 
@@ -436,10 +486,10 @@ public class Executor
         }
         if (TransientTypes.Contains(paramType) || TransientTypes.Contains(MapType(paramType)))
         {
-            var parms = await ResolveConstructorParameters(paramType, scope);
+            using var parms = await ResolveConstructorParameters(paramType, scope);
 
             var newType = MapType(paramType);
-            var res = Activator.CreateInstance(newType, parms.ToArray())!;
+            var res = Activator.CreateInstance(newType, parms.ToDisposableArray())!;
 
             scope.AddDisposable(res);
 
@@ -465,7 +515,7 @@ public class Executor
     private readonly HashSet<(Step Step, Task Task)> executing = new();
     private readonly SemaphoreSlim containerLock = new(1, 1);
 
-    protected class Scope
+    protected class Scope : IAsyncDisposable
     {
         public void Register(object? possibleDisposable)
         {
@@ -485,7 +535,7 @@ public class Executor
                 Disposables.Push(asyncDisp);
         }
 
-        public async Task DisposeAsync()
+        public async ValueTask DisposeAsync()
         {
             Scoped.Clear();
             ParameterTypesPreviouslyAttemptedToCreate.Clear();
@@ -521,5 +571,12 @@ public class Executor
             }
             public void Dispose() => scope.ParameterTypesPreviouslyAttemptedToCreate.Remove(type);
         }
+    }
+
+    protected PooledList<T> ToListFromPool<T>(IEnumerable<T> values)
+    {
+        var list = PooledList<T>.Get();
+        list.List.AddRange(values);
+        return list;
     }
 }

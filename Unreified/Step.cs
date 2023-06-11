@@ -1,4 +1,6 @@
-﻿namespace Unreified;
+﻿using System.Security.Cryptography;
+
+namespace Unreified;
 public record class Step
 {
     protected Step(
@@ -44,6 +46,13 @@ public record class Step
         public string? NamedDependency { get; }
         public Type? TypedDependency { get; }
         public object? ExactValueDependency { get; }
+
+        internal string Stringify()
+            => ExactValueDependency is { } value
+                ? $"Value: {value}"
+                : NamedDependency is { } name
+                    ? $"Name: {name}"
+                    : $"Type: {TypedDependency!.Name}";
     }
 
     public readonly record struct StepSignature
