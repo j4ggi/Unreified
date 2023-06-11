@@ -3,12 +3,9 @@
 namespace Unreified;
 public class Executor
 {
-    public Executor(Behavior behavior = Behavior.AllowExplicitOverwrites)
+    public Executor()
     {
-        Behavior = behavior;
     }
-
-    public Behavior Behavior { get; }
 
     public async Task RunAll(byte maxDegreeOfParallelism, CancellationToken token)
     {
