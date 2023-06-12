@@ -389,6 +389,27 @@ public class ExecutorTests
     }
 
     [Fact]
+    public async Task Output_attribute_becomes_available_as_input()
+    {
+        var list = new List<string>();
+        var executor = new Executor();
+
+        bool executed = false;
+        executor.AddSteps(Step.FromMethod(
+            [Output("test")] () =>
+            {
+            }));
+
+        executor.AddSteps(Step.FromMethod(
+            [Input("test")] () =>
+            {
+                executed = true;
+            }));
+        await executor.RunAll(10, default);
+        Assert.True(executed);
+    }
+
+    [Fact]
     public async Task Different_mutexes_can_execute_simultaneously()
     {
         var list = new List<string>();
