@@ -22,6 +22,8 @@ public class Executor
                     if (!IsLocked(step))
                     {
                         toRun.List.Add(step);
+                        foreach (var mutex in step.Mutexes)
+                            mutexes.Add(mutex);
                         executing.Add((step, Execute(step, false, token)));
                     }
                 }
@@ -46,7 +48,11 @@ public class Executor
                 }
 
                 foreach (var step in toRun.List)
+                {
                     _ = steps.Remove(step);
+                    foreach (var mutex in step.Mutexes)
+                        mutexes.Remove(mutex);
+                }
             }
 
             _ = await Task.WhenAny(executing.Select(x => x.Task));

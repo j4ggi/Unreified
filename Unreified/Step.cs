@@ -21,7 +21,7 @@ public record class Step
             : new ReadOnlyCollection<StepIO>(inputs);
     }
     public StepSignature Self { get; }
-    public IList<StepIO>? Mutexes { get; }
+    public IList<StepIO> Mutexes { get; }
     public IReadOnlyCollection<StepIO> Outputs { get; }
     public IReadOnlyCollection<StepIO> Inputs { get; }
 
@@ -105,7 +105,7 @@ public record class Step
             self: new(method),
             outputs: outputs.Distinct().ToList(),
             inputs: parms.Concat(inputs).Distinct().ToList(),
-            mutexes: mutexes.Concat(outputs).Distinct().ToList());
+            mutexes: mutexes.Distinct().ToList());
     }
 
     public static Step FromType<TType>() where TType : IExecutable
@@ -133,7 +133,7 @@ public record class Step
             self: new(type),
             outputs: outputs.Distinct().ToList(),
             inputs: inputs.Distinct().ToList(),
-            mutexes: mutexes.Concat(outputs).Distinct().ToList());
+            mutexes: mutexes.Distinct().ToList());
     }
 
     private static List<StepIO> GetIO<T>(IEnumerable<Attribute> attributes)

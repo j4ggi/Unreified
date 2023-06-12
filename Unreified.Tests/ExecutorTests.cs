@@ -31,7 +31,7 @@ public class ExecutorTests
     public async Task Step_with_input_dependecies_throws_MissingDependencyException_with_empty_container()
     {
         var res = false;
-        var toExecute = Step.FromMethod([Input(42)]() => res = true);
+        var toExecute = Step.FromMethod([Input(42)] () => res = true);
 
         await Assert.ThrowsAnyAsync<MissingDependencyException>(
             async () => await new Executor().Execute(toExecute, default));
@@ -45,7 +45,7 @@ public class ExecutorTests
         var res = false;
         var executor = new Executor();
         executor.RegisterSingleton(43);
-        var toExecute = Step.FromMethod([Input(42)]() => res = true);
+        var toExecute = Step.FromMethod([Input(42)] () => res = true);
 
         await Assert.ThrowsAnyAsync<MissingDependencyException>(
             async () => await executor.Execute(toExecute, default));
@@ -59,7 +59,7 @@ public class ExecutorTests
         var res = false;
         var executor = new Executor();
         executor.RegisterSingleton(42);
-        var toExecute = Step.FromMethod([Input(42)]() => res = true);
+        var toExecute = Step.FromMethod([Input(42)] () => res = true);
 
         await executor.Execute(toExecute, default);
 
@@ -165,7 +165,7 @@ public class ExecutorTests
         var toExecute2 = Step.FromMethod((string s) => { res2 = true; });
 
         await executor.Execute(toExecute2, default);
-        
+
         Assert.True(res2);
         Assert.Equal(2, counter);
     }
@@ -191,7 +191,7 @@ public class ExecutorTests
         var toExecute2 = Step.FromMethod((string s) => { res2 = true; });
 
         await executor.Execute(toExecute2, token: default);
-        
+
         Assert.True(res2);
         Assert.Equal(1, counter);
     }
@@ -322,7 +322,8 @@ public class ExecutorTests
     {
         var list = new List<string>();
         var executor = new Executor();
-        executor.AddSteps(Step.FromMethod((Disposable f) => {
+        executor.AddSteps(Step.FromMethod((Disposable f) =>
+        {
             list.Add("main");
         }));
         executor.AddSteps(Step.FromMethod(async () =>
@@ -343,7 +344,8 @@ public class ExecutorTests
         var list = new List<string>();
         var executor = new Executor();
         executor.AddSteps(Step.FromMethod((Disposable f) => { list.Add("main"); }));
-        executor.AddSteps(Step.FromMethod(() => {
+        executor.AddSteps(Step.FromMethod(() =>
+        {
             list.Add("factory string");
             return "";
         }));
@@ -357,6 +359,61 @@ public class ExecutorTests
             x => Assert.Equal("factory string", x),
             x => Assert.Equal("factory disp", x),
             x => Assert.Equal("main", x));
+    }
+
+    [Fact]
+    public async Task Mutually_exclusive_steps_do_not_execute_simultaneously()
+    {
+        var list = new List<string>();
+        var executor = new Executor();
+        int counter = 0;
+        var sem = new SemaphoreSlim(0);
+        executor.AddSteps(Step.FromMethod(
+            [MutuallyExclusive("group")] async () =>
+            {
+                Assert.Equal(1, Interlocked.Increment(ref counter));
+                Assert.False(await sem.WaitAsync(100));
+                sem.Release();
+                Interlocked.Decrement(ref counter);
+            }));
+
+        executor.AddSteps(Step.FromMethod(
+            [MutuallyExclusive("group")] async () =>
+            {
+                sem.Release();
+                Assert.Equal(1, Interlocked.Increment(ref counter));
+                Assert.True(await sem.WaitAsync(100));
+                Interlocked.Decrement(ref counter);
+            }));
+        await executor.RunAll(10, default);
+    }
+
+    [Fact]
+    public async Task Different_mutexes_can_execute_simultaneously()
+    {
+        var list = new List<string>();
+        var executor = new Executor();
+        int counter = 0;
+        var sem = new SemaphoreSlim(0);
+        var sem2 = new SemaphoreSlim(0);
+        executor.AddSteps(Step.FromMethod(
+            [MutuallyExclusive("first")] async () =>
+            {
+                Assert.Equal(1, Interlocked.Increment(ref counter));
+                Assert.True(await sem2.WaitAsync(100));
+                sem.Release();
+                Interlocked.Decrement(ref counter);
+            }));
+
+        executor.AddSteps(Step.FromMethod(
+            [MutuallyExclusive("second")] async () =>
+            {
+                sem2.Release();
+                Assert.Equal(2, Interlocked.Increment(ref counter));
+                Assert.True(await sem.WaitAsync(100));
+                Interlocked.Decrement(ref counter);
+            }));
+        await executor.RunAll(10, default);
     }
 
     class Disposable : IDisposable
