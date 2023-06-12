@@ -238,4 +238,91 @@ public class ExecutorTests
         await Assert.ThrowsAnyAsync<DependencyLoopException>(async () => await executor.Execute(toExecute, default));
         Assert.False(res);
     }
+
+    [Fact]
+    public async Task Disposable_singleton_dependencies_are_not_disposed()
+    {
+        var disp = new Disposable();
+        var toExecute = Step.FromMethod((Disposable f) => { });
+        var executor = new Executor();
+        executor.RegisterSingleton(disp);
+        await executor.Execute(toExecute, default);
+
+        Assert.Equal(1, disp.Result);
+    }
+
+    [Fact]
+    public async Task Disposable_dependencies_from_singleton_factories_are_not_disposed()
+    {
+        var disp = new Disposable();
+        var toExecute = Step.FromMethod((Disposable f) => { });
+        var executor = new Executor();
+        executor.RegisterSingletonFactory<Disposable>(() => disp);
+        await executor.Execute(toExecute, default);
+
+        Assert.Equal(1, disp.Result);
+    }
+
+    [Fact]
+    public async Task Disposable_dependencies_from_scoped_factories_are_disposed()
+    {
+        var disp = new Disposable();
+        var toExecute = Step.FromMethod((Disposable f) => { });
+        var executor = new Executor();
+        executor.RegisterScopedFactory<Disposable>(() => disp);
+        await executor.Execute(toExecute, default);
+
+        Assert.Equal(0, disp.Result);
+    }
+
+    [Fact]
+    public async Task Disposable_dependencies_from_transient_factories_are_disposed()
+    {
+        var disp = new Disposable();
+        var toExecute = Step.FromMethod((Disposable f) => { });
+        var executor = new Executor();
+        executor.RegisterTransientFactory<Disposable>(() => disp);
+        await executor.Execute(toExecute, default);
+
+        Assert.Equal(0, disp.Result);
+    }
+
+    [Fact]
+    public async Task Disposable_dependencies_from_are_disposed_in_reverse_order_to_creation()
+    {
+        var disposables = new Stack<Disposable>();
+        var toExecute = Step.FromMethod((Disposable f, int a) => { });
+        var executor = new Executor();
+        int counter = 0;
+        executor.RegisterTransientFactory<Disposable>(() =>
+        {
+            var res = new Disposable();
+            counter++;
+            res.OnDispose += a =>
+            {
+                var popped = disposables.Pop();
+                Assert.Equal(a, popped);
+                Assert.Equal(0, popped.Result);
+            };
+            disposables.Push(res);
+
+            return res;
+        });
+        executor.RegisterTransientFactory<int>((Disposable a) => 0);
+        await executor.Execute(toExecute, default);
+
+        Assert.Equal(2, counter);
+        Assert.Empty(disposables);
+    }
+
+    class Disposable : IDisposable
+    {
+        public int Result { get; private set; } = 1;
+        public event Action<Disposable>? OnDispose;
+        public void Dispose()
+        {
+            Result--;
+            OnDispose?.Invoke(this);
+        }
+    }
 }
