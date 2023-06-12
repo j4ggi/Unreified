@@ -115,10 +115,14 @@ public record class Step
             mutexes: mutexes.Concat(outputs).Distinct().ToList());
     }
 
-    public static Step FromType<TType>() => FromType(typeof(TType));
+    public static Step FromType<TType>() where TType : IExecutable
+        => FromType(typeof(TType));
 
     public static Step FromType(Type type)
     {
+        if (!type.IsAssignableTo(typeof(IExecutable)))
+            throw new InvalidOperationException($"{type.Name} must be assignable to {typeof(IExecutable).FullName}");
+
         var isAbstract = type.IsAbstract || type.IsInterface;
 
         var parms = type.GetConstructors().Single(x => !x.IsStatic).GetParameters();
@@ -128,7 +132,7 @@ public record class Step
         var overwrites = GetIO<OverwritesAttribute>(type.GetCustomAttributes());
         outputs.Add(new StepIO(type));
 
-        if(!isAbstract)
+        if (!isAbstract)
         {
             inputs.AddRange(parms.Select(x => new StepIO(x.ParameterType)));
         }
