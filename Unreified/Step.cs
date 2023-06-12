@@ -7,13 +7,9 @@ public record class Step
         StepSignature self,
         IList<StepIO>? outputs,
         IList<StepIO>? inputs,
-        IList<StepIO>? overwrites,
         IList<StepIO>? mutexes)
     {
         Self = self;
-        Overwrites = overwrites is null || overwrites.Count == 0
-            ? Array.Empty<StepIO>()
-            : new ReadOnlyCollection<StepIO>(overwrites);
         Mutexes = mutexes is null || mutexes.Count == 0
             ? Array.Empty<StepIO>()
             : new ReadOnlyCollection<StepIO>(mutexes);
@@ -25,7 +21,6 @@ public record class Step
             : new ReadOnlyCollection<StepIO>(inputs);
     }
     public StepSignature Self { get; }
-    public IList<StepIO>? Overwrites { get; }
     public IList<StepIO>? Mutexes { get; }
     public IReadOnlyCollection<StepIO> Outputs { get; }
     public IReadOnlyCollection<StepIO> Inputs { get; }
@@ -105,13 +100,11 @@ public record class Step
         var inputs = GetIO<InputAttribute>(method.Method.GetCustomAttributes());
         var outputs = GetIO<OutputAttribute>(method.Method.GetCustomAttributes());
         var mutexes = GetIO<MutuallyExclusiveAttribute>(method.Method.GetCustomAttributes());
-        var overwrites = GetIO<OverwritesAttribute>(method.Method.GetCustomAttributes());
 
         return new Step(
             self: new(method),
-            outputs: outputs.Concat(overwrites).Distinct().ToList(),
+            outputs: outputs.Distinct().ToList(),
             inputs: parms.Concat(inputs).Distinct().ToList(),
-            overwrites: overwrites.Distinct().ToList(),
             mutexes: mutexes.Concat(outputs).Distinct().ToList());
     }
 
@@ -129,7 +122,6 @@ public record class Step
         var inputs = GetIO<InputAttribute>(type.GetCustomAttributes());
         var outputs = GetIO<OutputAttribute>(type.GetCustomAttributes());
         var mutexes = GetIO<MutuallyExclusiveAttribute>(type.GetCustomAttributes());
-        var overwrites = GetIO<OverwritesAttribute>(type.GetCustomAttributes());
         outputs.Add(new StepIO(type));
 
         if (!isAbstract)
@@ -139,9 +131,8 @@ public record class Step
 
         return new Step(
             self: new(type),
-            outputs: outputs.Concat(overwrites).Distinct().ToList(),
+            outputs: outputs.Distinct().ToList(),
             inputs: inputs.Distinct().ToList(),
-            overwrites: overwrites.Distinct().ToList(),
             mutexes: mutexes.Concat(outputs).Distinct().ToList());
     }
 
@@ -154,7 +145,6 @@ public record class Step
                 InputAttribute input => input.Input,
                 OutputAttribute output => output.Output,
                 MutuallyExclusiveAttribute mutex => mutex.Mutex,
-                OverwritesAttribute overwrites => overwrites.Output,
                 _ => throw new Exception("Unsupported IO type")
             })
             .Distinct()
