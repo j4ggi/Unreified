@@ -27,7 +27,23 @@ public class Executor
                 }
 
                 if (executing.Count == 0)
-                    throw new LeftOverStepException("Could not execute all steps. Make sure all dependencies can be resolved");
+                {
+                    var missingDeps = new List<StepIO>();
+                    foreach (var step in steps)
+                    {
+                        await using var scope = Pooled<Scope>.Get();
+                        if (GetMissingDependencies(step, scope.Value) is { Length: > 0 } missing)
+                        {
+                            missingDeps.AddRange(missing);
+                        }
+                    }
+                    var leftoverSteps = string.Join(Environment.NewLine, steps.Select(x => x.Self));
+                    var deps = String.Join(Environment.NewLine, missingDeps.Select(x => x.Stringify()));
+                    var missingDepsMessage = $"Missing dependencies:{Environment.NewLine}{deps}";
+                    throw new LeftOverStepException(
+                        $"Could not execute following steps:{Environment.NewLine}{leftoverSteps}." +
+                        $"{Environment.NewLine}{missingDepsMessage}");
+                }
 
                 foreach (var step in toRun.List)
                     _ = steps.Remove(step);

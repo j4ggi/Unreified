@@ -1,4 +1,6 @@
-﻿namespace Unreified.Tests;
+﻿using System.Collections.Generic;
+
+namespace Unreified.Tests;
 
 public class ExecutorTests
 {
@@ -313,6 +315,48 @@ public class ExecutorTests
 
         Assert.Equal(2, counter);
         Assert.Empty(disposables);
+    }
+
+    [Fact]
+    public async Task Orchestrated_steps_wait_for_dependencies()
+    {
+        var list = new List<string>();
+        var executor = new Executor();
+        executor.AddSteps(Step.FromMethod((Disposable f) => {
+            list.Add("main");
+        }));
+        executor.AddSteps(Step.FromMethod(async () =>
+        {
+            list.Add("factory");
+            return new Disposable();
+        }));
+        await executor.RunAll(1, default);
+
+        Assert.Collection(list,
+            x => Assert.Equal("factory", x),
+            x => Assert.Equal("main", x));
+    }
+
+    [Fact]
+    public async Task Orchestrated_steps_wait_for_nested_dependencies()
+    {
+        var list = new List<string>();
+        var executor = new Executor();
+        executor.AddSteps(Step.FromMethod((Disposable f) => { list.Add("main"); }));
+        executor.AddSteps(Step.FromMethod(() => {
+            list.Add("factory string");
+            return "";
+        }));
+        executor.RegisterTransientFactory<Disposable>(async (string a) =>
+        {
+            list.Add("factory disp");
+            return new Disposable();
+        });
+        await executor.RunAll(1, default);
+        Assert.Collection(list,
+            x => Assert.Equal("factory string", x),
+            x => Assert.Equal("factory disp", x),
+            x => Assert.Equal("main", x));
     }
 
     class Disposable : IDisposable
