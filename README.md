@@ -3,6 +3,11 @@ Unreified is a dependency injection container and execution orchestrator for .NE
 
 It is designed to help manage dependencies that will be created as a part of a longer or more complex process and to facilitate flow of a result of one execution step to the next.
 
+## Installing Unreified
+via command line `dotnet add package Unreified`
+
+or via [NuGet](https://www.nuget.org/packages/Unreified) `Install-Package Unreified`
+
 ## First class support for passing data between steps
 No more using global variables or `IMemoryCache` to pass things between different services. Just return the thing. That's it.
 
