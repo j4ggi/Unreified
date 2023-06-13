@@ -1,5 +1,5 @@
 # Unreified
-Unreified is a dependency injection and execution orchestrator for .NET
+Unreified is a dependency injection container and execution orchestrator for .NET
 
 It is designed to help manage dependencies that will be created as a part of a longer or more complex process and to facilitate flow of a result of one execution step to the next.
 
@@ -75,7 +75,7 @@ void SecondStepWithDependencies(string s) => {};
 
 var executor = new Executor();
 // These steps can be registered in ANY order. Here they happen to be registered in execution order,
-// but that's just to make it easier to understand what was the intention of the author
+// but that's simply to make it easier to understand what was the author's intention
 executor.AddSteps(
     Step.FromMethod(IndependentStep1),
     Step.FromMethod(IndependentStep2),
