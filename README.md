@@ -7,7 +7,6 @@ It is designed to help manage dependencies that will be created as a part of a l
 No more using global variables or `IMemoryCache` to pass things between different services. Just return the thing. That's it.
 
 ```csharp
-
 async static Task<Func<string>> LongOperation()
 {
     await Task.Delay(1000);
@@ -20,13 +19,11 @@ var executor = new Executor();
 await executor.Execute(Step.FromMethod(LongOperation), CancellationToken.None);
 // the result of LongOperation (Func<string>) is now available in a container and will be injected to SayHello
 await executor.Execute(Step.FromMethod(SayHello), CancellationToken.None);
-
 ```
 
 ## Support for asynchronous factories
 Just do it. There is no excuse for "standard" containers to not support it, and yet it is always a problem. But not here:
 ```csharp
-
 var executor = new Executor();
 executor.RegisterTransientFactory<string>(async () => { await Task.Delay(1000); return "hello"; });
 
@@ -38,7 +35,6 @@ await executor.Execute(
 ## Automatic orchestration and dependency resolution
 So one of your execution steps returns a thing, that thing is a dependency for a factory, and that factory returns something for the next step. Sounds awful to do with a "standard" container. Here it is easy:
 ```csharp
-
 async static Task<object> LongOperation()
 {
     await Task.Delay(1000);
@@ -57,14 +53,12 @@ executor.RegisterTransientFactory<string>((Func<string> func) => func());
 // The dependency for the string factory will be materialized during execution, as a result of one of the steps
 // and then it will be properly registered as a delegate of type Func<string>
 await executor.RunAll(maxDegreeOfParallelism: 1, CancellationToken.None);
-
 ```
 
 ## Parallel execution
 If your execution steps do not depend on one another, you can execute them simultaneously
 
 ```csharp
-
 record class Dependency1();
 record class Dependency2();
 
