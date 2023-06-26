@@ -11,10 +11,10 @@ public class Executor
     {
         while (steps.Count > 0)
         {
-            using (var available = await GetAvailableSteps(steps))
+            using (await stepsLocker.LockAsync())
             using (var toRun = PooledList<Step>.Get())
             {
-                foreach (var step in available.List)
+                await foreach (var step in GetAvailableSteps(steps))
                 {
                     if (executing.Count == maxDegreeOfParallelism)
                         break;
@@ -30,21 +30,7 @@ public class Executor
 
                 if (executing.Count == 0)
                 {
-                    var missingDeps = new List<StepIO>();
-                    foreach (var step in steps)
-                    {
-                        await using var scope = Pooled<Scope>.Get();
-                        if (GetMissingDependencies(step, scope.Value) is { Length: > 0 } missing)
-                        {
-                            missingDeps.AddRange(missing);
-                        }
-                    }
-                    var leftoverSteps = string.Join(Environment.NewLine, steps.Select(x => x.Self));
-                    var deps = String.Join(Environment.NewLine, missingDeps.Select(x => x.Stringify()));
-                    var missingDepsMessage = $"Missing dependencies:{Environment.NewLine}{deps}";
-                    throw new LeftOverStepException(
-                        $"Could not execute following steps:{Environment.NewLine}{leftoverSteps}." +
-                        $"{Environment.NewLine}{missingDepsMessage}");
+                    await ReportLeftoverSteps();
                 }
 
                 foreach (var step in toRun.List)
@@ -71,23 +57,55 @@ public class Executor
         }
 
         await Task.WhenAll(executing.Select(x => x.Task));
+
+        async Task ReportLeftoverSteps()
+        {
+            var missingDeps = new List<StepIO>();
+            foreach (var step in steps)
+            {
+                await using var scope = Pooled<ExecutionScope>.Get();
+                if (GetMissingDependencies(step, scope.Value) is { Length: > 0 } missing)
+                {
+                    missingDeps.AddRange(missing);
+                }
+            }
+            var leftoverSteps = string.Join(Environment.NewLine, steps.Select(x => x.Self));
+            var deps = String.Join(Environment.NewLine, missingDeps.Select(x => x.Stringify()));
+            var missingDepsMessage = $"Missing dependencies:{Environment.NewLine}{deps}";
+            throw new LeftOverStepException(
+                $"Could not execute following steps:{Environment.NewLine}{leftoverSteps}." +
+                $"{Environment.NewLine}{missingDepsMessage}");
+        }
     }
 
-    protected virtual async ValueTask<PooledList<Step>> GetAvailableSteps(IEnumerable<Step> steps)
+    protected virtual async IAsyncEnumerable<Step> GetAvailableSteps(IEnumerable<Step> steps)
     {
-        var list = PooledList<Step>.Get();
+        using var tempMutexes = PooledSet<StepIO>.Get();
         foreach (var step in steps)
         {
-            if (await CanRunStep(step))
-                list.List.Add(step);
-        }
+            if (!await CanRunStep(step))
+                continue;
 
-        return list;
+            bool skipOuter = false;
+            foreach (var m in step.Mutexes)
+            {
+                if (!tempMutexes.Set.Add(m))
+                {
+                    skipOuter = true;
+                    break;
+                }
+            }
+
+            if (skipOuter)
+                continue;
+
+            yield return step;
+        }
     }
 
     protected virtual async Task Execute(Type type, CancellationToken token)
     {
-        await using var scope = Pooled<Scope>.Get();
+        await using var scope = Pooled<ExecutionScope>.Get();
         IExecutable res;
         using var parms = await ResolveConstructorParameters(type, scope.Value);
         {
@@ -96,7 +114,7 @@ public class Executor
         }
         var result = await res.Execute(token);
 
-        using (await containerLock.WaitIf(true))
+        using (await containerLocker.WaitIf(true))
             IoCContainer.TryAdd(type, res);
 
         await AddObjectsToContainer(result, false);
@@ -107,7 +125,7 @@ public class Executor
         token.ThrowIfCancellationRequested();
         foreach (var step in steps)
         {
-            await using var scope = Pooled<Scope>.Get();
+            await using var scope = Pooled<ExecutionScope>.Get();
             await AddObjectsToContainer(await Invoke(step, scope.Value), false);
 
             token.ThrowIfCancellationRequested();
@@ -116,6 +134,24 @@ public class Executor
 
     public virtual void AddSteps(params Step[] steps)
     {
+        using (stepsLocker.Lock())
+        foreach (var step in steps)
+        {
+            if (step.Self.IsType)
+            {
+                var type = MapType(step.Self.Type!);
+                this.steps.Add(FromType(type));
+            }
+            else
+            {
+                this.steps.Add(step);
+            }
+        }
+    }
+
+    public virtual async Task AddStepsAsync(params Step[] steps)
+    {
+        using (await stepsLocker.LockAsync())
         foreach (var step in steps)
         {
             if (step.Self.IsType)
@@ -139,7 +175,7 @@ public class Executor
     {
         if (validate)
         {
-            await using var scope = Pooled<Scope>.Get();
+            await using var scope = Pooled<ExecutionScope>.Get();
             if (GetMissingDependencies(step, scope.Value) is { Length: > 0 } missingDeps)
             {
                 var deps = String.Join(Environment.NewLine, missingDeps.Select(x => x.Stringify()));
@@ -154,7 +190,7 @@ public class Executor
         return step;
     }
 
-    private async Task<object?> Invoke(Delegate toInvoke, Scope toDispose)
+    private async Task<object?> Invoke(Delegate toInvoke, ExecutionScope toDispose)
     {
         using var parms = PooledList<object>.Get();
         foreach (var paramType in toInvoke.Method.GetParameters().Select(p => p.ParameterType))
@@ -265,7 +301,7 @@ public class Executor
         if (result is null)
             return;
 
-        using var @lock = await containerLock.WaitIf(!isLocked);
+        using var @lock = await containerLocker.WaitIf(!isLocked);
 
         if (result is IEnumerable<Delegate> delegates)
         {
@@ -285,7 +321,7 @@ public class Executor
         }
     }
 
-    private bool CanResolveObject(Type type, Scope scope)
+    private bool CanResolveObject(Type type, ExecutionScope scope)
     {
         using var dependencyLoopDetector = scope.CheckDependencyLoop(type);
 
@@ -348,11 +384,11 @@ public class Executor
         if (IsLocked(step))
             return false;
 
-        await using var scope = Pooled<Scope>.Get();
+        await using var scope = Pooled<ExecutionScope>.Get();
         return !GetMissingDependencies(step, scope.Value).Any();
     }
 
-    private StepIO[] GetMissingDependencies(Step step, Scope scope)
+    private StepIO[] GetMissingDependencies(Step step, ExecutionScope scope)
     {
         using var result = PooledList<StepIO>.Get();
 
@@ -406,7 +442,7 @@ public class Executor
     protected Type MapType(Type interfaceType)
         => TypeMap.GetValueOrDefault(interfaceType) ?? interfaceType;
 
-    private async ValueTask<PooledList<object>> ResolveConstructorParameters(Type type, Scope scope)
+    private async ValueTask<PooledList<object>> ResolveConstructorParameters(Type type, ExecutionScope scope)
     {
         var parms = PooledList<object>.Get();
         try
@@ -443,7 +479,7 @@ public class Executor
             : null;
     }
 
-    protected virtual async Task<object?> ResolveObject(Type paramType, Scope scope)
+    protected virtual async Task<object?> ResolveObject(Type paramType, ExecutionScope scope)
     {
         using var dependencyLoopDetector = scope.CheckDependencyLoop(paramType);
 
@@ -533,9 +569,10 @@ public class Executor
     private readonly HashSet<StepIO> stepResults = new(EqualityComparer<StepIO>.Default);
     private readonly HashSet<StepIO> mutexes = new();
     private readonly HashSet<(Step Step, Task Task)> executing = new();
-    private readonly SemaphoreSlim containerLock = new(1, 1);
+    private readonly SemaphoreSlim containerLocker = new(1, 1);
+    private readonly SemaphoreSlim stepsLocker = new(1, 1);
 
-    protected class Scope : IAsyncDisposable
+    protected class ExecutionScope : IAsyncDisposable
     {
         public void Register(object? possibleDisposable)
         {
@@ -579,10 +616,10 @@ public class Executor
 
         protected internal readonly struct DependencyLoopDetector : IDisposable
         {
-            private readonly Scope scope;
+            private readonly ExecutionScope scope;
             private readonly Type type;
 
-            public DependencyLoopDetector(Scope scope, Type type)
+            public DependencyLoopDetector(ExecutionScope scope, Type type)
             {
                 this.scope = scope;
                 this.type = type;

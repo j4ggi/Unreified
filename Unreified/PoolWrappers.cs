@@ -63,6 +63,35 @@ public struct PooledList<T> : IDisposable
     }
 }
 
+public readonly struct PooledSet<T> : IDisposable
+{
+    private static readonly ObjectPool<HashSet<T>> ListPool = ObjectPool.Create(new Policy());
+
+    public readonly HashSet<T> Set { get; }
+
+    private PooledSet(HashSet<T> list)
+    {
+        Set = list;
+    }
+
+    public static PooledSet<T> Get() => new(ListPool.Get());
+
+    public readonly void Dispose()
+    {
+        ListPool.Return(Set);
+    }
+
+    private class Policy : IPooledObjectPolicy<HashSet<T>>
+    {
+        public HashSet<T> Create() => new();
+        public bool Return(HashSet<T> obj)
+        {
+            obj.Clear();
+            return true;
+        }
+    }
+}
+
 public readonly struct Pooled<T> : IAsyncDisposable where T : class, IAsyncDisposable, new()
 {
     private static readonly ObjectPool<T> pool = ObjectPool.Create<T>();

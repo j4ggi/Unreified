@@ -39,6 +39,18 @@ internal static class Utils
         return new ConditionalLock(semaphore, condition);
     }
 
+    public static async ValueTask<ConditionalLock> LockAsync(this SemaphoreSlim semaphore)
+    {
+        await semaphore.WaitAsync();
+        return new ConditionalLock(semaphore, true);
+    }
+
+    public static ConditionalLock Lock(this SemaphoreSlim semaphore)
+    {
+        semaphore.Wait();
+        return new ConditionalLock(semaphore, true);
+    }
+
     public readonly record struct ConditionalLock : IDisposable
     {
         private readonly SemaphoreSlim semaphore;

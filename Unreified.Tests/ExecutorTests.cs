@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.Diagnostics;
 
 namespace Unreified.Tests;
 
@@ -435,6 +436,44 @@ public class ExecutorTests
                 Interlocked.Decrement(ref counter);
             }));
         await executor.RunAll(10, default);
+    }
+
+    [Fact]
+    public async Task Steps_can_be_added_while_executing()
+    {
+        var executor = new Executor();
+        executor.AddSteps(Step.FromMethod(() => Task.Delay(100)));
+        executor.AddSteps(Step.FromMethod(() => Task.Delay(100)));
+        var runingTask = executor.RunAll(10, default);
+
+        var sw = Stopwatch.StartNew();
+
+        executor.AddSteps(Step.FromMethod(() => Task.Delay(100)));
+        sw.Stop();
+
+        await runingTask;
+        Assert.True(sw.ElapsedMilliseconds < 100);
+    }
+
+    [Fact]
+    public async Task Steps_are_added_only_after_execution_batch_started()
+    {
+        var list = new List<Step>(100);
+        var started = new bool[100];
+        var executor = new Executor();
+
+        for (var i = 0; i < 100; i++)
+        {
+            var j = i;
+            executor.AddSteps(Step.FromMethod(async () => { started[j] = true; await Task.Delay(100); }));
+        }
+
+        Assert.Equal(0, started.Count(x => x));
+        var runingTask = executor.RunAll(50, default);
+        Assert.True(started.Count(x => x) >= 50);
+        executor.AddSteps(Step.FromMethod(() => Task.Delay(100)));
+
+        await runingTask;
     }
 
     class Disposable : IDisposable
