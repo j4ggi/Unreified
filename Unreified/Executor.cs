@@ -3,10 +3,6 @@
 namespace Unreified;
 public class Executor
 {
-    public Executor()
-    {
-    }
-
     public async Task RunAll(byte maxDegreeOfParallelism, CancellationToken token)
     {
         while (steps.Count > 0)
@@ -29,9 +25,7 @@ public class Executor
                 }
 
                 if (executing.Count == 0)
-                {
                     await ReportLeftoverSteps();
-                }
 
                 foreach (var step in toRun.List)
                 {
@@ -41,8 +35,8 @@ public class Executor
                 }
             }
 
-            _ = await Task.WhenAny(executing.Select(x => x.Task));
-            using var completed = ToListFromPool(executing.Where(x => x.Task.IsCompleted));
+            _ = await Task.WhenAny(executing.Select(static x => x.Task));
+            using var completed = ToPooledList(executing.Where(static x => x.Task.IsCompleted));
 
             foreach (var step in completed.List)
             {
@@ -50,27 +44,23 @@ public class Executor
                 await step.Task; // propagate any errors
             }
 
-            foreach (var res in completed.List.SelectMany(step => step.Step.Outputs))
-            {
+            foreach (var res in completed.List.SelectMany(static step => step.Step.Outputs))
                 stepResults.Add(res);
-            }
         }
 
-        await Task.WhenAll(executing.Select(x => x.Task));
+        await Task.WhenAll(executing.Select(static x => x.Task));
 
         async Task ReportLeftoverSteps()
         {
             var missingDeps = new List<StepIO>();
             foreach (var step in steps)
             {
-                await using var scope = Pooled<ExecutionScope>.Get();
-                if (GetMissingDependencies(step, scope.Value) is { Length: > 0 } missing)
-                {
-                    missingDeps.AddRange(missing);
-                }
+                using var missing = await GetMissingDependencies(step);
+                if (missing.List.Any())
+                    missingDeps.AddRange(missing.List);
             }
-            var leftoverSteps = string.Join(Environment.NewLine, steps.Select(x => x.Self));
-            var deps = String.Join(Environment.NewLine, missingDeps.Select(x => x.Stringify()));
+            var leftoverSteps = string.Join(Environment.NewLine, steps.Select(static x => x.Self));
+            var deps = String.Join(Environment.NewLine, missingDeps.Select(static x => x.Stringify()));
             var missingDepsMessage = $"Missing dependencies:{Environment.NewLine}{deps}";
             throw new LeftOverStepException(
                 $"Could not execute following steps:{Environment.NewLine}{leftoverSteps}." +
@@ -107,10 +97,10 @@ public class Executor
     {
         await using var scope = Pooled<ExecutionScope>.Get();
         IExecutable res;
-        using var parms = await ResolveConstructorParameters(type, scope.Value);
+        using (var parms = await ResolveConstructorParameters(type, scope.Value))
         {
             res = Activator.CreateInstance(MapType(type), parms.ToDisposableArray()) as IExecutable
-                ?? throw new InvalidOperationException();
+                ?? throw new InvalidOperationException($"Type {type.Name} is not {nameof(IExecutable)}");
         }
         var result = await res.Execute(token);
 
@@ -134,7 +124,7 @@ public class Executor
 
     public virtual void AddSteps(params Step[] steps)
     {
-        using (stepsLocker.Lock())
+        using var _ = stepsLocker.Lock();
         foreach (var step in steps)
         {
             if (step.Self.IsType)
@@ -149,9 +139,9 @@ public class Executor
         }
     }
 
-    public virtual async Task AddStepsAsync(params Step[] steps)
+    public virtual async ValueTask AddStepsAsync(params Step[] steps)
     {
-        using (await stepsLocker.LockAsync())
+        using var _ = await stepsLocker.LockAsync();
         foreach (var step in steps)
         {
             if (step.Self.IsType)
@@ -175,10 +165,10 @@ public class Executor
     {
         if (validate)
         {
-            await using var scope = Pooled<ExecutionScope>.Get();
-            if (GetMissingDependencies(step, scope.Value) is { Length: > 0 } missingDeps)
+            using var missingDeps = await GetMissingDependencies(step);
+            if (missingDeps.List.Any())
             {
-                var deps = String.Join(Environment.NewLine, missingDeps.Select(x => x.Stringify()));
+                var deps = String.Join(Environment.NewLine, missingDeps.List.Select(static x => x.Stringify()));
                 var message = $"Missing dependencies:{Environment.NewLine}{deps}";
                 throw new MissingDependencyException(message);
             }
@@ -193,21 +183,20 @@ public class Executor
     private async Task<object?> Invoke(Delegate toInvoke, ExecutionScope toDispose)
     {
         using var parms = PooledList<object>.Get();
-        foreach (var paramType in toInvoke.Method.GetParameters().Select(p => p.ParameterType))
+        foreach (var paramType in toInvoke.Method.GetParameters().Select(static p => p.ParameterType))
         {
             var value = await ResolveObject(paramType, toDispose);
-            if (value is not null)
-            {
-                parms.List.Add(value);
-            }
-            else
+            if (value is null)
             {
                 throw new MissingDependencyException("Missing dependency for method "
                     + GetName(toInvoke.Method)
                     + " of type "
                     + toInvoke.Target?.GetType().Name);
             }
+
+            parms.List.Add(value);
         }
+
         var res = toInvoke.DynamicInvoke(parms.ToDisposableArray());
         if (res is Task task)
         {
@@ -224,7 +213,7 @@ public class Executor
     {
         if (!IoCContainer.TryAdd(typeof(TDep), dependency))
         {
-            throw new Exception($"Duplicate dependency of type {typeof(TDep).FullName}");
+            throw new InvalidOperationException($"Duplicate dependency of type {typeof(TDep).FullName}");
         }
         TypeMap.Add(typeof(TDep), typeof(TDep));
     }
@@ -234,7 +223,7 @@ public class Executor
         if (!factory.Method.ReturnType.IsAssignableTo(typeof(TType))
             && !factory.Method.ReturnType.IsAssignableTo(typeof(Task<TType>)))
         {
-            throw new Exception($"{factory.Method.ReturnType.Name} is not assignable to {typeof(TType).Name}");
+            throw new InvalidOperationException($"{factory.Method.ReturnType.Name} is not assignable to {typeof(TType).Name}");
         }
 
         SingletonFactories.Add(typeof(TType), factory);
@@ -245,7 +234,7 @@ public class Executor
         if (!factory.Method.ReturnType.IsAssignableTo(typeof(TType))
             && !factory.Method.ReturnType.IsAssignableTo(typeof(Task<TType>)))
         {
-            throw new Exception($"{factory.Method.ReturnType.Name} is not assignable to {typeof(TType).Name}");
+            throw new InvalidOperationException($"{factory.Method.ReturnType.Name} is not assignable to {typeof(TType).Name}");
         }
 
         ScopedFactories.Add(typeof(TType), factory);
@@ -256,7 +245,7 @@ public class Executor
         if (!factory.Method.ReturnType.IsAssignableTo(typeof(TType))
             && !factory.Method.ReturnType.IsAssignableTo(typeof(Task<TType>)))
         {
-            throw new Exception($"{factory.Method.ReturnType.Name} is not assignable to {typeof(TType).Name}");
+            throw new InvalidOperationException($"{factory.Method.ReturnType.Name} is not assignable to {typeof(TType).Name}");
         }
 
         TransientFactories.Add(typeof(TType), factory);
@@ -321,6 +310,9 @@ public class Executor
         }
     }
 
+    private readonly Dictionary<Delegate, List<Type>> DelegateParameterCache = new();
+    private readonly Dictionary<Type, List<Type>> TypeParameterCache = new();
+
     private bool CanResolveObject(Type type, ExecutionScope scope)
     {
         using var dependencyLoopDetector = scope.CheckDependencyLoop(type);
@@ -336,40 +328,53 @@ public class Executor
                 ResolvableTypes.Add(type);
             return true;
         }
-        if (SingletonFactories.ContainsKey(type)
-            || ScopedFactories.ContainsKey(type)
-            || TransientFactories.ContainsKey(type))
-        {
-            var res =
-                (SingletonFactories.GetValueOrDefault(type)
-                    ?? ScopedFactories.GetValueOrDefault(type)
-                    ?? TransientFactories.GetValueOrDefault(type))
-                .Method.GetParameters()
-                .Select(x => x.ParameterType)
-                .All(t => CanResolveObject(t, scope));
 
+        if (SingletonFactories.TryGetValue(type, out var factory)
+            || ScopedFactories.TryGetValue(type, out factory)
+            || TransientFactories.TryGetValue(type, out factory))
+        {
+            List<Type> types;
+            lock (DelegateParameterCache)
+            {
+                types = DelegateParameterCache.TryGetValue(factory, out var found)
+                    ? found
+                    : DelegateParameterCache[factory] = factory.Method.GetParameters()
+                        .SelectList(static x => x.ParameterType);
+            }
+            var res = CanResolveAllObjects(types, scope);
             if (res)
             {
                 lock (ResolvableTypes)
                     ResolvableTypes.Add(type);
+                lock (DelegateParameterCache)
+                    DelegateParameterCache.Remove(factory);
             }
-
             return res;
         }
 
-        if (SingletonTypes.Contains(type)
+        var isRegisteredForCreation = SingletonTypes.Contains(type)
             || ScopedTypes.Contains(type)
-            || TransientTypes.Contains(type))
+            || TransientTypes.Contains(type);
+
+        if (!type.IsInterface && !type.IsAbstract && isRegisteredForCreation)
         {
-            var res = type.GetConstructors()
-                .Single(x => !x.IsStatic)
-                .GetParameters()
-                .Select(x => x.ParameterType)
-                .All(t => CanResolveObject(t, scope));
+            List<Type> types;
+            lock (TypeParameterCache)
+            {
+                types = TypeParameterCache.TryGetValue(type, out var found)
+                    ? found
+                    : TypeParameterCache[type] = type.GetConstructors()
+                        .Single(static x => !x.IsStatic)
+                        .GetParameters()
+                        .SelectList(static x => x.ParameterType);
+            }
+            var res = CanResolveAllObjects(types, scope);
             if (res)
             {
                 lock (ResolvableTypes)
                     ResolvableTypes.Add(type);
+                lock (TypeParameterCache)
+                    TypeParameterCache.Remove(type);
             }
 
             return res;
@@ -379,18 +384,29 @@ public class Executor
         return mappedType != type && CanResolveObject(mappedType, scope);
     }
 
+    private bool CanResolveAllObjects(IEnumerable<Type> types, ExecutionScope scope)
+    {
+        foreach (var type in types)
+        {
+            if (!CanResolveObject(type, scope))
+                return false;
+        }
+        return true;
+    }
+
     private async ValueTask<bool> CanRunStep(Step step)
     {
         if (IsLocked(step))
             return false;
 
-        await using var scope = Pooled<ExecutionScope>.Get();
-        return !GetMissingDependencies(step, scope.Value).Any();
+        using var missing = await GetMissingDependencies(step);
+        return !missing.List.Any();
     }
 
-    private StepIO[] GetMissingDependencies(Step step, ExecutionScope scope)
+    private async ValueTask<PooledList<StepIO>> GetMissingDependencies(Step step)
     {
-        using var result = PooledList<StepIO>.Get();
+        await using var scope = Pooled<ExecutionScope>.Get();
+        var result = PooledList<StepIO>.Get();
 
         foreach (var input in step.Inputs)
         {
@@ -401,7 +417,7 @@ public class Executor
             }
             else if (input.TypedDependency is { } type)
             {
-                if (!CanResolveObject(type, scope) && !stepResults.Contains(input))
+                if (!CanResolveObject(type, scope.Value) && !stepResults.Contains(input))
                     result.List.Add(input);
             }
             else if (input.ExactValueDependency is { } obj)
@@ -409,14 +425,11 @@ public class Executor
                 var hasResult = stepResults.Contains(input);
                 var hasSingleton = IoCContainer.TryGetValue(obj.GetType(), out var found) && found.Equals(obj);
                 if (!hasResult && !hasSingleton)
-                {
                     result.List.Add(input);
-                }
             }
         }
-        return result.List.Count > 0
-            ? result.List.ToArray()
-            : Array.Empty<StepIO>();
+
+        return result;
     }
 
     private static string GetName(MethodInfo method)
@@ -448,19 +461,16 @@ public class Executor
         try
         {
             var ctor = MapType(type).GetConstructors().Single();
-            foreach (var paramType in ctor.GetParameters().Select(p => p.ParameterType))
+            foreach (var paramType in ctor.GetParameters().Select(static p => p.ParameterType))
             {
                 var value = await ResolveObject(paramType, scope);
-                if (value is not null)
+                if (value is null)
                 {
-                    parms.List.Add(value);
-                }
-                else
-                {
-                    throw new Exception("Missing dependency of type " + paramType.Name + " for Step "
+                    throw new MissingDependencyException("Missing dependency of type " + paramType.Name + " for Step "
                         + GetName(type)
                         + ". Make sure you execute everything in proper order");
                 }
+                parms.List.Add(value);
             }
         }
         catch
@@ -630,7 +640,7 @@ public class Executor
         }
     }
 
-    protected PooledList<T> ToListFromPool<T>(IEnumerable<T> values)
+    protected PooledList<T> ToPooledList<T>(IEnumerable<T> values)
     {
         var list = PooledList<T>.Get();
         list.List.AddRange(values);

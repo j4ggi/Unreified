@@ -1,6 +1,4 @@
-﻿using System.Security.Cryptography;
-
-namespace Unreified;
+﻿namespace Unreified;
 public record class Step
 {
     protected Step(
@@ -145,7 +143,7 @@ public record class Step
                 InputAttribute input => input.Input,
                 OutputAttribute output => output.Output,
                 MutuallyExclusiveAttribute mutex => mutex.Mutex,
-                _ => throw new Exception("Unsupported IO type")
+                _ => throw new NotSupportedException("Unsupported IO type")
             })
             .Distinct()
             .ToList();

@@ -37,7 +37,7 @@ public struct PooledList<T> : IDisposable
     /// </summary>
     public T[] ToDisposableArray()
     {
-        var bag = ArrayPool.GetOrAdd(List.Count, count => new ConcurrentBag<T[]>());
+        var bag = ArrayPool.GetOrAdd(List.Count, static _ => new ConcurrentBag<T[]>());
         if (bag.TryTake(out var result))
         {
             array = result;

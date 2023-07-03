@@ -13,6 +13,16 @@ internal static class Utils
         return true;
     }
 
+    public static List<TOut> SelectList<TIn, TOut>(this ICollection<TIn> coll, Func<TIn, TOut> transform)
+    {
+        var res = new List<TOut>(coll.Count);
+        foreach (var item in coll)
+        {
+            res.Add(transform(item));
+        }
+        return res;
+    }
+
     public static bool TryAdd<TKey, TVal>(this IDictionary<TKey, TVal> dict, TKey key, TVal value)
     {
         if (dict.ContainsKey(key))
@@ -24,7 +34,7 @@ internal static class Utils
     public static TValue GetValueOrDefault<TKey, TValue>(this IDictionary<TKey, TValue> dict, TKey key)
     {
         _ = dict.TryGetValue(key, out var value);
-        return value;
+        return value!;
     }
 
     public static bool IsAssignableTo(this Type type1, Type type2)
