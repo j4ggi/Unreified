@@ -5,9 +5,9 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <PackageId>Unreified</PackageId>
-    <Version>1.0.1</Version>
+    <Version>1.0.2</Version>
     <Authors>Radosław Jagiełło</Authors>
-    <Description>DI container and execution orchestrator for .NET</Description>
+    <Description>DI container and in-process pipeline orchestrator for .NET</Description>
     <Copyright>Copyright Radosław Jagiełło</Copyright>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
