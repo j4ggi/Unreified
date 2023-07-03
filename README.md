@@ -1,7 +1,7 @@
 # Unreified
-Unreified is a dependency injection container and execution orchestrator for .NET
+Unreified is a dependency injection container and in-process pipeline orchestrator for .NET
 
-It is designed to help manage dependencies that will be created as a part of a longer or more complex process and to facilitate flow of a result of one execution step to the next.
+It is designed to help manage dependencies that will be created as a part of a longer or more complex process and to facilitate flow of data from one step to the next.
 
 ## Installing Unreified
 via command line `dotnet add package Unreified`
@@ -26,19 +26,8 @@ await executor.Execute(Step.FromMethod(LongOperation), CancellationToken.None);
 await executor.Execute(Step.FromMethod(SayHello), CancellationToken.None);
 ```
 
-## Support for asynchronous factories
-Just do it. There is no excuse for "standard" containers to not support it, and yet it is always a problem. But not here:
-```csharp
-var executor = new Executor();
-executor.RegisterTransientFactory<string>(async () => { await Task.Delay(1000); return "hello"; });
-
-await executor.Execute(
-    Step.FromMethod((string dependency) => Console.WriteLine(dependency)),
-    CancellationToken.None);
-```
-
 ## Automatic orchestration and dependency resolution
-So one of your execution steps returns a thing, that thing is a dependency for a factory, and that factory returns something for the next step. Sounds awful to do with a "standard" container. Here it is easy:
+So one of your execution steps returns a thing, that thing is a dependency for a factory, and that factory returns something for the next step. Sounds awful to do with a "standard" container. With Unreified it is easy:
 ```csharp
 async static Task<object> LongOperation()
 {
