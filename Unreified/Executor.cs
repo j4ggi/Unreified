@@ -110,6 +110,13 @@ public class Executor
         await AddObjectsToContainer(result, false);
     }
 
+    public virtual async Task<(IAsyncDisposable, T)> Instantiate<T>()
+    {
+        var scope = Pooled<ExecutionScope>.Get();
+        using var parms = await ResolveConstructorParameters(typeof(T), scope.Value);
+        return (scope, (T)Activator.CreateInstance(MapType(typeof(T)), parms.ToDisposableArray()));
+    }
+
     protected virtual async Task Execute(CancellationToken token, params Delegate[] steps)
     {
         token.ThrowIfCancellationRequested();
