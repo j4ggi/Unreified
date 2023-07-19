@@ -1,12 +1,17 @@
-﻿using static Unreified.Step;
+﻿using System.ComponentModel;
+
+using static Unreified.Step;
 
 namespace Unreified;
-public class Executor
+public class Executor : ICloneable, IAsyncDisposable
 {
     public async Task RunAll(byte maxDegreeOfParallelism, CancellationToken token)
     {
+        using var exeLocker = await executionLocker.LockAsync();
+
         while (steps.Count > 0)
         {
+            token.ThrowIfCancellationRequested();
             using (await stepsLocker.LockAsync())
             using (var toRun = PooledList<Step>.Get())
             {
@@ -15,6 +20,7 @@ public class Executor
                     if (executing.Count == maxDegreeOfParallelism)
                         break;
 
+                    token.ThrowIfCancellationRequested();
                     if (!IsLocked(step))
                     {
                         toRun.List.Add(step);
@@ -110,11 +116,18 @@ public class Executor
         await AddObjectsToContainer(result, false);
     }
 
-    public virtual async Task<(IAsyncDisposable, T)> Instantiate<T>()
+    /// <summary>
+    /// Creates and instance of given type using available dependencies
+    /// </summary>
+    /// <typeparam name="T">Type of item to create</typeparam>
+    /// <returns>Requested service with a scope to dispose which contains disposable dependencies created for this service and this service (if it is <see cref="IDisposable"/> or <see cref="IAsyncDisposable"/>)</returns>
+    public virtual async Task<ServiceWithScope<T>> Instantiate<T>()
     {
         var scope = Pooled<ExecutionScope>.Get();
         using var parms = await ResolveConstructorParameters(typeof(T), scope.Value);
-        return (scope, (T)Activator.CreateInstance(MapType(typeof(T)), parms.ToDisposableArray()));
+        var service = (T)Activator.CreateInstance(MapType(typeof(T)), parms.ToDisposableArray());
+        scope.Value.AddDisposable(service);
+        return (scope, service);
     }
 
     protected virtual async Task Execute(CancellationToken token, params Delegate[] steps)
@@ -165,6 +178,7 @@ public class Executor
 
     public async Task<Step> Execute(Step step, CancellationToken token)
     {
+        using var exeLocker = await executionLocker.LockAsync();
         return await Execute(step, true, token);
     }
 
@@ -572,6 +586,44 @@ public class Executor
         return null;
     }
 
+    /// <summary>
+    /// Get a new instance of <see cref="Executor"/> with all registered results, dependencies and factories.
+    /// Cannot be used during execution. Does not copy registered steps.
+    /// Any changes to the new instance will not affect the original instance.
+    /// Any later changes to original instance will not affect the new instance.
+    /// </summary>
+    public async Task<Executor> Clone()
+    {
+        var res = new Executor();
+
+        using var lock3 = await executionLocker.LockAsync();
+        using var lock1 = await containerLocker.LockAsync();
+        using var lock2 = await stepsLocker.LockAsync();
+
+        CopyDict(IoCContainer, res.IoCContainer);
+        CopyDict(TypeMap, res.TypeMap);
+        CopyDict(SingletonFactories, res.SingletonFactories);
+        CopyDict(ScopedFactories, res.ScopedFactories);
+        CopyDict(TransientFactories, res.TransientFactories);
+        CopySet(ResolvableTypes, res.ResolvableTypes);
+        CopySet(TransientTypes, res.TransientTypes);
+        CopySet(ScopedTypes, res.ScopedTypes);
+        CopySet(SingletonTypes, res.SingletonTypes);
+        CopySet(stepResults, res.stepResults);
+
+        return res;
+        static void CopyDict<TKey, TValue>(IDictionary<TKey, TValue> source, IDictionary<TKey, TValue> target)
+        {
+            foreach (var item in source)
+                target.Add(item.Key, item.Value);
+        }
+        static void CopySet<TValue>(HashSet<TValue> source, HashSet<TValue> target)
+        {
+            foreach (var item in source)
+                target.Add(item);
+        }
+    }
+
     protected readonly Dictionary<Type, object> IoCContainer = new();
     protected readonly Dictionary<Type, Type> TypeMap = new();
     protected readonly HashSet<Type> ResolvableTypes = new();
@@ -588,6 +640,7 @@ public class Executor
     private readonly HashSet<(Step Step, Task Task)> executing = new();
     private readonly SemaphoreSlim containerLocker = new(1, 1);
     private readonly SemaphoreSlim stepsLocker = new(1, 1);
+    private readonly SemaphoreSlim executionLocker = new(1, 1);
 
     protected class ExecutionScope : IAsyncDisposable
     {
@@ -601,12 +654,8 @@ public class Executor
 
         public void AddDisposable(object? possibleDisposable)
         {
-            if (possibleDisposable == null)
-                return;
-            if (possibleDisposable is IDisposable disp)
-                Disposables.Push(disp);
-            else if (possibleDisposable is IAsyncDisposable asyncDisp)
-                Disposables.Push(asyncDisp);
+            if (possibleDisposable is IDisposable or IAsyncDisposable)
+                Disposables.Push(possibleDisposable);
         }
 
         public async ValueTask DisposeAsync()
@@ -652,5 +701,18 @@ public class Executor
         var list = PooledList<T>.Get();
         list.List.AddRange(values);
         return list;
+    }
+
+    object ICloneable.Clone() => this.Clone();
+
+    public async ValueTask DisposeAsync()
+    {
+        foreach (var item in IoCContainer.Values)
+        {
+            if (item is IDisposable d)
+                d.Dispose();
+            else if (item is IAsyncDisposable ad)
+                await ad.DisposeAsync();
+        }
     }
 }
