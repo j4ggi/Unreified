@@ -17,6 +17,17 @@ public class ExecutorTests
     }
 
     [Fact]
+    public async Task Steps_from_types_are_executed()
+    {
+        var fromType = Step.FromType<Executable>();
+        var check = Step.FromMethod((int a) => Assert.Equal(42, a));
+
+        var ex = new Executor();
+        ex.AddSteps(fromType, check);
+        await ex.RunAll(default);
+    }
+
+    [Fact]
     public async Task Step_with_dependecies_throws_MissingDependencyException_with_empty_container()
     {
         var res = false;
@@ -485,5 +496,10 @@ public class ExecutorTests
             Result--;
             OnDispose?.Invoke(this);
         }
+    }
+
+    class Executable : IExecutable<int>
+    {
+        public Task<int> Execute(CancellationToken token) => Task.FromResult(42);
     }
 }

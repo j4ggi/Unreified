@@ -5,6 +5,8 @@ using static Unreified.Step;
 namespace Unreified;
 public class Executor : ICloneable, IAsyncDisposable
 {
+    public async Task RunAll(CancellationToken cancellationToken) => await RunAll(1, cancellationToken);
+
     public async Task RunAll(byte maxDegreeOfParallelism, CancellationToken token)
     {
         using var exeLocker = await executionLocker.LockAsync();
