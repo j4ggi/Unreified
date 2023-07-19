@@ -1,4 +1,6 @@
-﻿using System.ComponentModel;
+﻿using System.Collections.Concurrent;
+using System.ComponentModel;
+using System.Diagnostics;
 
 using static Unreified.Step;
 
@@ -132,16 +134,12 @@ public class Executor : ICloneable, IAsyncDisposable
         return (scope, service);
     }
 
-    protected virtual async Task Execute(CancellationToken token, params Delegate[] steps)
+    protected virtual async Task Execute(CancellationToken token, Delegate step)
     {
         token.ThrowIfCancellationRequested();
-        foreach (var step in steps)
-        {
-            await using var scope = Pooled<ExecutionScope>.Get();
-            await AddObjectsToContainer(await Invoke(step, scope.Value), false);
-
-            token.ThrowIfCancellationRequested();
-        }
+        await using var scope = Pooled<ExecutionScope>.Get();
+        await AddObjectsToContainer(await Invoke(step, scope.Value), false);
+        token.ThrowIfCancellationRequested();
     }
 
     public virtual void AddSteps(params Step[] steps)
@@ -229,8 +227,36 @@ public class Executor : ICloneable, IAsyncDisposable
                     ? ResultProp.GetValue(task)
                     : null;
         }
+        // this should be safe because we never actually awaited ValueTask until this point
+        else if (res is ValueTask valueTask)
+        {
+            var asTask = valueTask.AsTask();
+            await asTask;
+            return null;
+        }
+        else if (IsGenericValueTask(toInvoke.Method.ReturnType))
+        {
+            var method =
+                GenericValueTaskToTaskConverter.GetOrAdd(
+                    toInvoke.Method.ReturnType,
+                    type => typeof(Executor)
+                        .GetMethod(nameof(ToTask))!
+                        .MakeGenericMethod(type.GetGenericArguments()));
+            var asTask = (Task)method.Invoke(null, new[] { res })!;
+            await asTask;
+            return asTask.GetType().GetProperty(nameof(Task<int>.Result))!.GetValue(asTask);
+        }
         return res;
     }
+
+    private static readonly ConcurrentDictionary<Type, MethodInfo> GenericValueTaskToTaskConverter = new();
+
+    private static bool IsGenericValueTask(Type returnType)
+    {
+        return returnType.IsGenericType && returnType.GetGenericTypeDefinition() == typeof(ValueTask<>);
+    }
+
+    private static Task<T> ToTask<T>(ValueTask<T> vt) => vt.AsTask();
 
     public void RegisterSingleton<TDep>(TDep dependency) where TDep : notnull
     {
