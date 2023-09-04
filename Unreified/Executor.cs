@@ -1,6 +1,4 @@
 ﻿using System.Collections.Concurrent;
-using System.ComponentModel;
-using System.Diagnostics;
 
 using static Unreified.Step;
 
@@ -124,14 +122,14 @@ public class Executor : ICloneable, IAsyncDisposable
     /// Creates and instance of given type using available dependencies
     /// </summary>
     /// <typeparam name="T">Type of item to create</typeparam>
-    /// <returns>Requested service with a scope to dispose which contains disposable dependencies created for this service and this service (if it is <see cref="IDisposable"/> or <see cref="IAsyncDisposable"/>)</returns>
+    /// <returns>Requested service with a scope to dispose which contains disposable dependencies created for this service and the service itself (if it is <see cref="IDisposable"/> or <see cref="IAsyncDisposable"/>)</returns>
     public virtual async Task<ServiceWithScope<T>> Instantiate<T>()
     {
         var scope = Pooled<ExecutionScope>.Get();
         using var parms = await ResolveConstructorParameters(typeof(T), scope.Value);
-        var service = (T)Activator.CreateInstance(MapType(typeof(T)), parms.ToDisposableArray());
+        var service = (T)Activator.CreateInstance(MapType(typeof(T)), parms.ToDisposableArray())!;
         scope.Value.AddDisposable(service);
-        return (scope, service);
+        return new(scope, service);
     }
 
     protected virtual async Task Execute(CancellationToken token, Delegate step)
