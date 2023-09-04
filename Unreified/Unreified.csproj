@@ -5,13 +5,17 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <PackageId>Unreified</PackageId>
-    <Version>1.0.2</Version>
+    <Version>1.1.0</Version>
     <Authors>Radosław Jagiełło</Authors>
     <Description>DI container and in-process pipeline orchestrator for .NET</Description>
     <Copyright>Copyright Radosław Jagiełło</Copyright>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/j4ggi/Unreified</RepositoryUrl>
+    <PackageReleaseNotes>v1.1.0:
+Added support for ValueTask.
+Added option to instantiate a service.
+Added default method body for IExecutable&lt;T&gt; interface</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup>
