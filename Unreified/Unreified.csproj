@@ -1,11 +1,11 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>netstandard2.0;net6.0</TargetFrameworks>
+    <TargetFrameworks>netstandard2.0;net6.0;net8.0</TargetFrameworks>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <PackageId>Unreified</PackageId>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <Authors>Radosław Jagiełło</Authors>
     <Description>DI container and in-process pipeline orchestrator for .NET</Description>
     <Copyright>Copyright Radosław Jagiełło</Copyright>
@@ -15,7 +15,11 @@
     <PackageReleaseNotes>v1.1.0:
 Added support for ValueTask.
 Added option to instantiate a service.
-Added default method body for IExecutable&lt;T&gt; interface</PackageReleaseNotes>
+Added default method body for IExecutable&lt;T&gt; interface.
+v1.2.0:
+Fixed step instantiation when multiple steps tried to execute the same singleton factory simultaneously.
+List of missing dependecies is now distinct
+    </PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup>
