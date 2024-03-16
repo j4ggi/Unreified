@@ -302,7 +302,7 @@ public class ExecutorTests
     }
 
     [Fact]
-    public async Task Disposable_dependencies_from_are_disposed_in_reverse_order_to_creation()
+    public async Task Disposable_dependencies_are_disposed_in_reverse_order_to_creation()
     {
         var disposables = new Stack<Disposable>();
         var toExecute = Step.FromMethod((Disposable f, int a) => { });

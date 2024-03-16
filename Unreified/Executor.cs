@@ -60,12 +60,12 @@ public class Executor : ICloneable, IAsyncDisposable
 
         async Task ReportLeftoverSteps()
         {
-            var missingDeps = new List<StepIO>();
+            var missingDeps = new HashSet<StepIO>();
             foreach (var step in steps)
             {
                 using var missing = await GetMissingDependencies(step);
-                if (missing.List.Any())
-                    missingDeps.AddRange(missing.List);
+                foreach (var dep in missing.List)
+                    missingDeps.Add(dep);
             }
             var leftoverSteps = string.Join(Environment.NewLine, steps.Select(static x => x.Self));
             var deps = String.Join(Environment.NewLine, missingDeps.Select(static x => x.Stringify()));
@@ -105,6 +105,7 @@ public class Executor : ICloneable, IAsyncDisposable
     {
         await using var scope = Pooled<ExecutionScope>.Get();
         IExecutable res;
+        using (await containerLocker.LockAsync())
         using (var parms = await ResolveConstructorParameters(type, scope.Value))
         {
             res = Activator.CreateInstance(MapType(type), parms.ToDisposableArray()) as IExecutable
@@ -112,7 +113,7 @@ public class Executor : ICloneable, IAsyncDisposable
         }
         var result = await res.Execute(token);
 
-        using (await containerLocker.WaitIf(true))
+        using (await containerLocker.LockAsync())
             IoCContainer.TryAdd(type, res);
 
         await AddObjectsToContainer(result, false);
@@ -136,7 +137,7 @@ public class Executor : ICloneable, IAsyncDisposable
     {
         token.ThrowIfCancellationRequested();
         await using var scope = Pooled<ExecutionScope>.Get();
-        await AddObjectsToContainer(await Invoke(step, scope.Value), false);
+        await AddObjectsToContainer(await Invoke(step, scope.Value, true), false);
         token.ThrowIfCancellationRequested();
     }
 
@@ -192,28 +193,38 @@ public class Executor : ICloneable, IAsyncDisposable
                 throw new MissingDependencyException(message);
             }
         }
-        if (step.Self.IsType)
-            await Execute(step.Self.Type!, token);
-        else
-            await Execute(token, step.Self.Method!);
+        try
+        {
+            if (step.Self.IsType)
+                await Execute(step.Self.Type!, token);
+            else
+                await Execute(token, step.Self.Method!);
+        }
+        catch (Exception e)
+        {
+            throw new AggregateException($"Exception occurred in step {step.Self}", e);
+        }
         return step;
     }
 
-    private async Task<object?> Invoke(Delegate toInvoke, ExecutionScope toDispose)
+    private async Task<object?> Invoke(Delegate toInvoke, ExecutionScope toDispose, bool shouldLock = false)
     {
         using var parms = PooledList<object>.Get();
-        foreach (var paramType in toInvoke.Method.GetParameters().Select(static p => p.ParameterType))
+        using (await containerLocker.WaitIf(shouldLock))
         {
-            var value = await ResolveObject(paramType, toDispose);
-            if (value is null)
+            foreach (var paramType in toInvoke.Method.GetParameters().Select(static p => p.ParameterType))
             {
-                throw new MissingDependencyException("Missing dependency for method "
-                    + GetName(toInvoke.Method)
-                    + " of type "
-                    + toInvoke.Target?.GetType().Name);
-            }
+                var value = await ResolveObject(paramType, toDispose);
+                if (value is null)
+                {
+                    throw new MissingDependencyException("Missing dependency for method "
+                        + GetName(toInvoke.Method)
+                        + " of type "
+                        + toInvoke.Target?.GetType().Name);
+                }
 
-            parms.List.Add(value);
+                parms.List.Add(value);
+            }
         }
 
         var res = toInvoke.DynamicInvoke(parms.ToDisposableArray());
